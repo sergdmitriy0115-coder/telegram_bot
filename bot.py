@@ -3,17 +3,19 @@ import logging
 import threading
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 # --- НАСТРОЙКИ ---
-BOT_TOKEN = os.environ.get('TELEGRAM_TOKEN')  # Токен из переменных окружения
-ADMIN_ID = 1121954610  # Твой Telegram ID (замени, если нужно)
+BOT_TOKEN = os.environ.get('TELEGRAM_TOKEN')
+ADMIN_ID = 1121954610  # ТВОЙ ID
+GROUP_ID = -1001234567890  # 🔥 ЗДЕСЬ БУДЕТ ID ТВОЕЙ ГРУППЫ (ОТРИЦАТЕЛЬНОЕ ЧИСЛО)
 LOG_FILE = "logs.txt"
 
-# Хранилище связи: {admin_message_id: user_chat_id}
-# Нужно, чтобы помнить, кому отвечать, когда ты реплаишь сообщение
-user_reply_map = {}
+# Хранилище: {user_id: topic_id}
+user_topics = {}
+# Хранилище этапов диалога
+user_stage = {}
 
 # --- Логирование ---
 logging.basicConfig(
@@ -28,175 +30,295 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"OK")
-    
-    def log_message(self, format, *args):
-        pass
+    def log_message(self, format, *args): pass
 
 def run_health_server():
     try:
         server = HTTPServer(('0.0.0.0', 10000), HealthCheckHandler)
-        logger.info("✅ Health check server started on port 10000")
+        logger.info("✅ Health check server started")
         server.serve_forever()
     except Exception as e:
         logger.error(f"Health server error: {e}")
 
 # === СОХРАНЕНИЕ В ЛОГ ===
-def save_message(user_id, username, first_name, text):
+def save_message(user_id, username, first_name, text, is_from_admin=False):
     try:
         with open(LOG_FILE, "a", encoding="utf-8") as f:
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            f.write(f"[{now}] | ID: {user_id} | @{username} | {first_name}: {text}\n")
+            sender = "АДМИН" if is_from_admin else "КЛИЕНТ"
+            f.write(f"[{now}] {sender} | ID: {user_id} | @{username} | {first_name}: {text}\n")
     except Exception as e:
-        logger.error(f"Ошибка при сохранении лога: {e}")
+        logger.error(f"Log error: {e}")
+
+# === ПОЛУЧИТЬ ИЛИ СОЗДАТЬ ТЕМУ ДЛЯ КЛИЕНТА ===
+async def get_or_create_topic(context: ContextTypes.DEFAULT_TYPE, user_id: int, username: str, first_name: str):
+    """Возвращает ID темы для клиента, создаёт новую если нужно"""
+    global user_topics
+    
+    if user_id in user_topics:
+        return user_topics[user_id]
+    
+    # Создаём название темы
+    topic_name = f"{first_name} (@{username if username else 'no_username'})"
+    
+    try:
+        # Создаём тему в группе
+        result = await context.bot.create_forum_topic(
+            chat_id=GROUP_ID,
+            name=topic_name[:128]  # Ограничение длины
+        )
+        topic_id = result.message_thread_id
+        user_topics[user_id] = topic_id
+        
+        # Приветственное сообщение в теме для админа
+        await context.bot.send_message(
+            chat_id=GROUP_ID,
+            message_thread_id=topic_id,
+            text=f"🆕 **Новый клиент!**\n"
+                 f"Имя: {first_name}\n"
+                 f"Username: @{username if username else 'нет'}\n"
+                 f"ID: `{user_id}`\n\n"
+                 f"📝 Все сообщения клиента будут приходить сюда.\n"
+                 f"💬 Чтобы ответить, просто напиши в эту тему."
+        )
+        
+        logger.info(f"✅ Создана тема {topic_id} для пользователя {user_id}")
+        return topic_id
+    except Exception as e:
+        logger.error(f"❌ Ошибка создания темы: {e}")
+        return None
 
 # === КОМАНДА /START ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    
+    save_message(user.id, user.username or "нет", user.first_name or "нет", "/start")
+    
+    # Создаём или получаем тему
+    topic_id = await get_or_create_topic(context, user.id, user.username, user.first_name)
+    
+    if not topic_id:
+        await update.message.reply_text("❌ Техническая ошибка. Попробуйте позже.")
+        return
+    
+    # Устанавливаем этап 1
+    user_stage[user.id] = 1
+    
+    # Отправляем приветствие клиенту
     await update.message.reply_text(
-        f"Добрый день, {user.first_name}! Меня зовут ADD bot. Я ваш личный помощник. Подскажите, какой у вас вопрос?"
+        f"Здравствуйте, {user.first_name}! 👋\n\n"
+        f"Подскажите, по какому вопросу хотели бы к нам обратиться?"
+    )
+    
+    # Уведомление в тему для админа
+    await context.bot.send_message(
+        chat_id=GROUP_ID,
+        message_thread_id=topic_id,
+        text=f"👤 Клиент начал диалог. Ожидается ответ на вопрос."
     )
 
 # === ОБРАБОТКА СООБЩЕНИЙ ОТ КЛИЕНТОВ ===
 async def handle_client_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает сообщения от обычных пользователей и пересылает их админу"""
     user = update.effective_user
     message = update.message
+    user_id = user.id
+    
+    # Сохраняем в лог
+    save_message(user_id, user.username or "нет", user.first_name or "нет", message.text)
+    
+    # Получаем или создаём тему
+    topic_id = await get_or_create_topic(context, user_id, user.username, user.first_name)
+    if not topic_id:
+        await message.reply_text("❌ Ошибка")
+        return
+    
+    # Пересылаем сообщение клиента в тему
+    await context.bot.send_message(
+        chat_id=GROUP_ID,
+        message_thread_id=topic_id,
+        text=f"👤 **Клиент:**\n{message.text}"
+    )
+    
+    # Обработка этапов диалога
+    stage = user_stage.get(user_id, 0)
+    
+    if stage == 1:
+        # Клиент ответил на вопрос
+        await message.reply_text(
+            "Отлично, спасибо за ваш ответ! 👍\n\n"
+            "В ближайшее время с вами свяжется наша команда."
+        )
+        user_stage[user_id] = 2
+        
+        await context.bot.send_message(
+            chat_id=GROUP_ID,
+            message_thread_id=topic_id,
+            text=f"✅ Клиенту отправлено подтверждение. Ожидание дальнейших сообщений."
+        )
+        
+    elif stage == 2:
+        # Клиент пишет после подтверждения
+        await message.reply_text(
+            "Остались ли у вас какие-либо вопросы? 🤔"
+        )
+        user_stage[user_id] = 3
+        
+        await context.bot.send_message(
+            chat_id=GROUP_ID,
+            message_thread_id=topic_id,
+            text=f"❓ Клиенту отправлен вопрос об остальных вопросах."
+        )
+        
+    elif stage == 3:
+        # Клиент ответил на вопрос
+        await message.reply_text(
+            "Если что-то непонятно, обратитесь пожалуйста сюда: @serg.dmitriy 📱\n\n"
+            "Всегда рады помочь!"
+        )
+        user_stage[user_id] = 4
+        
+        await context.bot.send_message(
+            chat_id=GROUP_ID,
+            message_thread_id=topic_id,
+            text=f"📱 Клиенту отправлен контакт для связи. Диалог завершён."
+        )
+        
+    else:
+        # После завершения диалога
+        await message.reply_text(
+            "Если у вас появились новые вопросы, просто напишите нам! Мы обязательно поможем. 🙌"
+        )
+        
+        await context.bot.send_message(
+            chat_id=GROUP_ID,
+            message_thread_id=topic_id,
+            text=f"📨 Новое сообщение после диалога:\n{message.text}"
+        )
+
+# === ОБРАБОТКА ОТВЕТОВ ИЗ ТЕМЫ (АДМИН ПИШЕТ В ТЕМЕ) ===
+async def handle_admin_reply_in_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Админ отвечает в теме → отправляем клиенту"""
+    
+    # Проверяем, что сообщение из нашей группы
+    if update.effective_chat.id != GROUP_ID:
+        return
+    
+    # Проверяем, что это сообщение в теме (не общий чат)
+    if not update.effective_message.message_thread_id:
+        return
+    
+    message = update.effective_message
+    topic_id = message.message_thread_id
+    
+    # Ищем клиента по ID темы
+    client_id = None
+    for uid, tid in user_topics.items():
+        if tid == topic_id:
+            client_id = uid
+            break
+    
+    if not client_id:
+        await message.reply_text("❌ Не могу найти клиента для этой темы.")
+        return
+    
+    # Отправляем ответ клиенту (от имени бота)
+    await context.bot.send_message(
+        chat_id=client_id,
+        text=f"{message.text}"
+    )
     
     # Сохраняем в лог
     save_message(
-        user_id=user.id,
-        username=user.username or "нет_username",
-        first_name=user.first_name or "нет_имени",
-        text=message.text or "[не текст]"  # Для фото/видео нужна отдельная обработка
+        user_id=ADMIN_ID,
+        username="admin",
+        first_name="Админ",
+        text=message.text,
+        is_from_admin=True
     )
     
-    # Создаём информационную подпись для админа
-    user_info = (
-        f"📨 Сообщение от пользователя:\n"
-        f"ID: {user.id}\n"
-        f"Username: @{user.username if user.username else 'нет'}\n"
-        f"Имя: {user.first_name}\n\n"
-        f"Текст: {message.text}"
-    )
-    
-    # Пересылаем сообщение админу
-    sent_message = await context.bot.send_message(
-        chat_id=ADMIN_ID,
-        text=user_info
-    )
-    
-    # Запоминаем связь: ID сообщения у админа → ID чата пользователя
-    user_reply_map[sent_message.message_id] = user.id
-    
-    # Отправляем подтверждение клиенту
-    await message.reply_text("Cпасибо за твой ответ. Скоро с тобой свяжется команда")
+    # Подтверждение в тему
+    await message.reply_text("✅ Ответ отправлен клиенту!")
+    logger.info(f"Админ ответил клиенту {client_id} через тему {topic_id}")
 
-# === ОБРАБОТКА ОТВЕТОВ ОТ АДМИНА ===
-async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает ответы админа (когда он отвечает на пересланное сообщение)"""
+# === ОБРАБОТКА МЕДИА ===
+async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     message = update.message
     
-    # Проверяем, что это админ
-    if user.id != ADMIN_ID:
+    # Получаем тему
+    topic_id = await get_or_create_topic(context, user.id, user.username, user.first_name)
+    if not topic_id:
+        await message.reply_text("❌ Ошибка")
         return
     
-    # Проверяем, что это ответ на какое-то сообщение
-    if not message.reply_to_message:
-        await message.reply_text("ℹ️ Чтобы ответить клиенту, используй 'Reply' на его сообщение.")
-        return
+    # Определяем тип медиа
+    media_type = "фото"
+    if message.video:
+        media_type = "видео"
+    elif message.document:
+        media_type = "документ"
+    elif message.voice:
+        media_type = "голосовое"
     
-    # Получаем ID сообщения, на которое ответили
-    replied_msg_id = message.reply_to_message.message_id
+    # Пересылаем медиа в тему
+    await message.forward(chat_id=GROUP_ID, message_thread_id=topic_id)
     
-    # Ищем, какому клиенту это сообщение принадлежит
-    if replied_msg_id in user_reply_map:
-        client_chat_id = user_reply_map[replied_msg_id]
-        
-        # Отправляем ответ клиенту
-        await context.bot.send_message(
-            chat_id=client_chat_id,
-            text=f"✏️ Ответ от администратора:\n\n{message.text}"
-        )
-        
-        # Уведомляем админа
-        await message.reply_text("✅ Ответ отправлен клиенту!")
-        
-        # Логируем
-        logger.info(f"Админ ответил клиенту {client_chat_id}")
-    else:
-        await message.reply_text("❌ Не могу найти, кому отправить ответ. Возможно, бот перезапускался и потерял связь.")
-
-# === ОБРАБОТКА ФОТО/ВИДЕО (базовая) ===
-async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Просто пересылает медиафайлы админу как есть"""
-    user = update.effective_user
-    
-    # Пересылаем оригинальное сообщение админу
-    await update.message.forward(chat_id=ADMIN_ID)
-    
-    # Отправляем информацию о пользователе отдельно
+    # Добавляем информацию
     await context.bot.send_message(
-        chat_id=ADMIN_ID,
-        text=f"📎 Медиафайл от @{user.username or 'нет'} (ID: {user.id})"
+        chat_id=GROUP_ID,
+        message_thread_id=topic_id,
+        text=f"📎 {media_type} от клиента"
     )
     
-    await update.message.reply_text("✅ Файл передан администратору!")
-
-# === КОМАНДА ДЛЯ АДМИНА (просмотр логов) ===
-async def admin_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+    # Сохраняем в лог
+    save_message(user.id, user.username or "нет", user.first_name or "нет", f"[{media_type}]")
     
-    if user_id != ADMIN_ID:
-        await update.message.reply_text("⛔ Нет прав.")
+    # Отвечаем клиенту
+    await message.reply_text("✅ Файл получен!")
+
+# === КОМАНДА ДЛЯ ЛОГОВ ===
+async def admin_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
         return
     
     try:
-        if os.path.exists(LOG_FILE) and os.path.getsize(LOG_FILE) > 0:
+        if os.path.exists(LOG_FILE):
             with open(LOG_FILE, "rb") as f:
-                await update.message.reply_document(
-                    document=f,
-                    filename=f"logs_{datetime.now().strftime('%Y%m%d')}.txt",
-                    caption="📋 Логи сообщений"
-                )
+                await update.message.reply_document(f)
         else:
-            await update.message.reply_text("📭 Логов пока нет.")
+            await update.message.reply_text("Логов нет")
     except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка: {e}")
+        await update.message.reply_text(f"Ошибка: {e}")
 
-# === ГЛАВНАЯ ФУНКЦИЯ ===
+# === ГЛАВНАЯ ===
 def main():
-    application = Application.builder().token(BOT_TOKEN).build()
+    app = Application.builder().token(BOT_TOKEN).build()
     
-    # Обработчики для админа
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("admin_logs", admin_logs))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("admin_logs", admin_logs))
     
-    # Обработчик ответов админа (должен быть перед общим обработчиком)
-    application.add_handler(MessageHandler(
-        filters.Chat(ADMIN_ID) & filters.TEXT & ~filters.COMMAND,
-        handle_admin_reply
+    # Обработка ответов админа из темы
+    app.add_handler(MessageHandler(
+        filters.Chat(GROUP_ID) & filters.TEXT & ~filters.COMMAND,
+        handle_admin_reply_in_topic
     ))
     
-    # Обработчик медиа от клиентов
-    application.add_handler(MessageHandler(
-        ~filters.Chat(ADMIN_ID) & (filters.PHOTO | filters.VIDEO | filters.Document.ALL),
+    # Медиа от клиентов
+    app.add_handler(MessageHandler(
+        ~filters.Chat(ADMIN_ID) & (filters.PHOTO | filters.VIDEO | filters.Document.ALL | filters.VOICE),
         handle_media
     ))
     
-    # Обработчик текстовых сообщений от клиентов
-    application.add_handler(MessageHandler(
+    # Текст от клиентов
+    app.add_handler(MessageHandler(
         ~filters.Chat(ADMIN_ID) & filters.TEXT & ~filters.COMMAND,
         handle_client_message
     ))
     
-    logger.info("🚀 Бот-консультант запущен!")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    logger.info("🚀 Бот с темами запущен")
+    app.run_polling()
 
 if __name__ == "__main__":
-    # Запускаем health check сервер
     health_thread = threading.Thread(target=run_health_server, daemon=True)
     health_thread.start()
-    
-    # Запускаем бота
     main()

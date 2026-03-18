@@ -7,7 +7,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 # --- БЕРЁМ ТОКЕН ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ---
-BOT_TOKEN = os.environ.get('8603711589:AAEqA6rQU-m5BxNAcdvMGnIrW4jtrxB2Avg')
+TELEGRAM_TOKEN = os.environ.get('8603711589:AAEqA6rQU-m5BxNAcdvMGnIrW4jtrxB2Avg')
 ADMIN_ID = 1121954610  # ЗАМЕНИ НА СВОЙ ID!
 LOG_FILE = "logs.txt"
 

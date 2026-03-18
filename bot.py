@@ -3,13 +3,17 @@ import logging
 import threading
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# --- БЕРЁМ ТОКЕН ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ---
-BOT_TOKEN = os.environ.get('TELEGRAM_TOKEN')  # Теперь точно совпадает с Render!
-ADMIN_ID = 1121954610  # ЗАМЕНИ НА СВОЙ ID (узнай у @userinfobot)
+# --- НАСТРОЙКИ ---
+BOT_TOKEN = os.environ.get('TELEGRAM_TOKEN')  # Токен из переменных окружения
+ADMIN_ID = 1121954610  # Твой Telegram ID (замени, если нужно)
 LOG_FILE = "logs.txt"
+
+# Хранилище связи: {admin_message_id: user_chat_id}
+# Нужно, чтобы помнить, кому отвечать, когда ты реплаишь сообщение
+user_reply_map = {}
 
 # --- Логирование ---
 logging.basicConfig(
@@ -18,7 +22,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# === ВЕБ-СЕРВЕР ДЛЯ RENDER (только ОДИН раз!) ===
+# === ВЕБ-СЕРВЕР ДЛЯ RENDER ===
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -26,7 +30,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"OK")
     
     def log_message(self, format, *args):
-        pass  # Отключаем логирование запросов
+        pass
 
 def run_health_server():
     try:
@@ -36,7 +40,7 @@ def run_health_server():
     except Exception as e:
         logger.error(f"Health server error: {e}")
 
-# === ФУНКЦИЯ ДЛЯ СОХРАНЕНИЯ СООБЩЕНИЙ ===
+# === СОХРАНЕНИЕ В ЛОГ ===
 def save_message(user_id, username, first_name, text):
     try:
         with open(LOG_FILE, "a", encoding="utf-8") as f:
@@ -49,27 +53,97 @@ def save_message(user_id, username, first_name, text):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     await update.message.reply_text(
-        f"Здарова браток, {user.first_name}! Я типа твой бот-консультант, но я не хочу тебе отвечать."
+        f"Добрый день, {user.first_name}! Меня зовут ADD bot. Я ваш личный помощник. Подскажите, какой у вас вопрос?"
     )
 
-# === АВТООТВЕТЧИК ===
-async def auto_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# === ОБРАБОТКА СООБЩЕНИЙ ОТ КЛИЕНТОВ ===
+async def handle_client_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает сообщения от обычных пользователей и пересылает их админу"""
     user = update.effective_user
-    user_message = update.message.text
+    message = update.message
     
+    # Сохраняем в лог
     save_message(
         user_id=user.id,
         username=user.username or "нет_username",
         first_name=user.first_name or "нет_имени",
-        text=user_message
+        text=message.text or "[не текст]"  # Для фото/видео нужна отдельная обработка
     )
     
-    logger.info(f"Сообщение от {user.id} (@{user.username}): {user_message}")
+    # Создаём информационную подпись для админа
+    user_info = (
+        f"📨 Сообщение от пользователя:\n"
+        f"ID: {user.id}\n"
+        f"Username: @{user.username if user.username else 'нет'}\n"
+        f"Имя: {user.first_name}\n\n"
+        f"Текст: {message.text}"
+    )
     
-    reply_text = "Ну я же просил, мне не писать. Лааадно, передам всё челобеку."
-    await update.message.reply_text(reply_text)
+    # Пересылаем сообщение админу
+    sent_message = await context.bot.send_message(
+        chat_id=ADMIN_ID,
+        text=user_info
+    )
+    
+    # Запоминаем связь: ID сообщения у админа → ID чата пользователя
+    user_reply_map[sent_message.message_id] = user.id
+    
+    # Отправляем подтверждение клиенту
+    await message.reply_text("Cпасибо за твой ответ. Скоро с тобой свяжется команда")
 
-# === КОМАНДА ДЛЯ АДМИНА ===
+# === ОБРАБОТКА ОТВЕТОВ ОТ АДМИНА ===
+async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает ответы админа (когда он отвечает на пересланное сообщение)"""
+    user = update.effective_user
+    message = update.message
+    
+    # Проверяем, что это админ
+    if user.id != ADMIN_ID:
+        return
+    
+    # Проверяем, что это ответ на какое-то сообщение
+    if not message.reply_to_message:
+        await message.reply_text("ℹ️ Чтобы ответить клиенту, используй 'Reply' на его сообщение.")
+        return
+    
+    # Получаем ID сообщения, на которое ответили
+    replied_msg_id = message.reply_to_message.message_id
+    
+    # Ищем, какому клиенту это сообщение принадлежит
+    if replied_msg_id in user_reply_map:
+        client_chat_id = user_reply_map[replied_msg_id]
+        
+        # Отправляем ответ клиенту
+        await context.bot.send_message(
+            chat_id=client_chat_id,
+            text=f"✏️ Ответ от администратора:\n\n{message.text}"
+        )
+        
+        # Уведомляем админа
+        await message.reply_text("✅ Ответ отправлен клиенту!")
+        
+        # Логируем
+        logger.info(f"Админ ответил клиенту {client_chat_id}")
+    else:
+        await message.reply_text("❌ Не могу найти, кому отправить ответ. Возможно, бот перезапускался и потерял связь.")
+
+# === ОБРАБОТКА ФОТО/ВИДЕО (базовая) ===
+async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Просто пересылает медиафайлы админу как есть"""
+    user = update.effective_user
+    
+    # Пересылаем оригинальное сообщение админу
+    await update.message.forward(chat_id=ADMIN_ID)
+    
+    # Отправляем информацию о пользователе отдельно
+    await context.bot.send_message(
+        chat_id=ADMIN_ID,
+        text=f"📎 Медиафайл от @{user.username or 'нет'} (ID: {user.id})"
+    )
+    
+    await update.message.reply_text("✅ Файл передан администратору!")
+
+# === КОМАНДА ДЛЯ АДМИНА (просмотр логов) ===
 async def admin_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
@@ -94,16 +168,33 @@ async def admin_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     application = Application.builder().token(BOT_TOKEN).build()
     
+    # Обработчики для админа
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("admin_logs", admin_logs))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, auto_reply))
     
-    logger.info("🚀 Бот запущен и готов к работе!")
+    # Обработчик ответов админа (должен быть перед общим обработчиком)
+    application.add_handler(MessageHandler(
+        filters.Chat(ADMIN_ID) & filters.TEXT & ~filters.COMMAND,
+        handle_admin_reply
+    ))
+    
+    # Обработчик медиа от клиентов
+    application.add_handler(MessageHandler(
+        ~filters.Chat(ADMIN_ID) & (filters.PHOTO | filters.VIDEO | filters.Document.ALL),
+        handle_media
+    ))
+    
+    # Обработчик текстовых сообщений от клиентов
+    application.add_handler(MessageHandler(
+        ~filters.Chat(ADMIN_ID) & filters.TEXT & ~filters.COMMAND,
+        handle_client_message
+    ))
+    
+    logger.info("🚀 Бот-консультант запущен!")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
-# === ТОЧКА ВХОДА ===
 if __name__ == "__main__":
-    # Запускаем health check сервер в отдельном потоке
+    # Запускаем health check сервер
     health_thread = threading.Thread(target=run_health_server, daemon=True)
     health_thread.start()
     

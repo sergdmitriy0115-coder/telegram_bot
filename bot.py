@@ -8,8 +8,8 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 
 # --- НАСТРОЙКИ ---
 BOT_TOKEN = os.environ.get('TELEGRAM_TOKEN')
-ADMIN_ID = 1121954610  # ТВОЙ ID
-GROUP_ID = -1003701333730  # 🔥 ЗДЕСЬ БУДЕТ ID ТВОЕЙ ГРУППЫ (ОТРИЦАТЕЛЬНОЕ ЧИСЛО)
+ADMIN_ID = 7675037573  # ТВОЙ ID
+GROUP_ID = -1003743707530  # 🔥 ЗДЕСЬ БУДЕТ ID ТВОЕЙ ГРУППЫ (ОТРИЦАТЕЛЬНОЕ ЧИСЛО)
 LOG_FILE = "logs.txt"
 
 # Хранилище: {user_id: topic_id}

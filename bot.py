@@ -7,7 +7,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 # --- БЕРЁМ ТОКЕН ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ---
-BOT_TOKEN = os.environ.get('8603711589:AAEqA6rQU-m5BxNAcdvMGnIrW4jtrxB2Avg')  # Теперь точно совпадает с Render!
+BOT_TOKEN = os.environ.get('TELEGRAM_TOKEN')  # Теперь точно совпадает с Render!
 ADMIN_ID = 1121954610  # ЗАМЕНИ НА СВОЙ ID (узнай у @userinfobot)
 LOG_FILE = "logs.txt"
 

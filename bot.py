@@ -4,6 +4,7 @@ import logging
 import threading
 import re
 import asyncio
+import traceback
 from datetime import datetime, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -18,6 +19,9 @@ ADMIN_ID = 7675037573  # ТВОЙ ID
 GROUP_ID = -1003743707530  # ID ТВОЕЙ ГРУППЫ С ТЕМАМИ
 LOG_FILE = "logs.txt"
 
+# --- НАСТРОЙКИ ДЛЯ ОТПРАВКИ ОШИБОК ---
+ERROR_LOG_CHAT = "@serg_dmitriy"  # КУДА ОТПРАВЛЯТЬ ОШИБКИ
+
 # --- НАСТРОЙКИ OPENROUTER / DEEPSEEK ---
 OPENROUTER_API_KEY = os.environ.get('OPENROUTER_API_KEY')
 AI_MODEL = "deepseek/deepseek-r1:free"  # Бесплатная модель
@@ -26,14 +30,14 @@ AI_MODEL = "deepseek/deepseek-r1:free"  # Бесплатная модель
 SPREADSHEET_ID = "15vlEZ0Q6OmQh51DsA9B_fgiLwed12ekroz1aeWsgXVI"
 WORKSHEET_NAME = "Логи клиентов"
 
-# Статусы для клиентов
+# Статусы для клиентов (БЕЗ ЦИФР - для красивого отображения)
 CLIENT_STATUSES = [
-    "1️⃣ Новый",
-    "2️⃣ В процессе квалификации", 
-    "3️⃣ Готов к передаче",
-    "4️⃣ Передан руководителю 👤",
-    "5️⃣ Негатив/Отказ",
-    "6️⃣ Нецелевой"
+    "Новый",
+    "В процессе квалификации", 
+    "Готов к передаче",
+    "Передан руководителю 👤",
+    "Негатив/Отказ",
+    "Нецелевой"
 ]
 
 # Контакты руководителей
@@ -84,6 +88,66 @@ def run_health_server():
         server.serve_forever()
     except Exception as e:
         logger.error(f"Health server error: {e}")
+
+# === ФУНКЦИЯ ДЛЯ ОТПРАВКИ ОШИБОК ===
+async def send_error_notification(context, error_title, error_details, user_info=None):
+    """Отправляет уведомление об ошибке в указанный чат"""
+    try:
+        error_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        message = f"🚨 **ОШИБКА В БОТЕ**\n\n"
+        message += f"⏰ **Время:** {error_time}\n"
+        message += f"📌 **Тип:** {error_title}\n\n"
+        message += f"📋 **Детали:**\n```\n{error_details[:1500]}\n```\n"
+        
+        if user_info:
+            message += f"\n👤 **Пользователь:** {user_info}"
+        
+        await context.bot.send_message(
+            chat_id=ERROR_LOG_CHAT,
+            text=message,
+            parse_mode='Markdown'
+        )
+        logger.info(f"✅ Уведомление об ошибке отправлено в {ERROR_LOG_CHAT}")
+    except Exception as e:
+        logger.error(f"❌ Не удалось отправить уведомление об ошибке: {e}")
+
+# === ГЛОБАЛЬНЫЙ ОБРАБОТЧИК ОШИБОК ===
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обрабатывает все ошибки, возникающие в боте"""
+    try:
+        error_title = "Исключение в обработчике"
+        error_details = traceback.format_exc()
+        
+        user_info = None
+        if update and update.effective_user:
+            user = update.effective_user
+            user_info = f"{user.first_name} (@{user.username}) ID: {user.id}"
+        
+        logger.error(f"❌ Ошибка: {error_details}")
+        await send_error_notification(context, error_title, error_details, user_info)
+        
+    except Exception as e:
+        logger.critical(f"❌ Критическая ошибка в error_handler: {e}")
+
+# === ДЕКОРАТОР ДЛЯ ОТЛОВА ОШИБОК В ФУНКЦИЯХ ===
+def catch_errors(func):
+    """Декоратор для отлова ошибок в асинхронных функциях"""
+    async def wrapper(update, context, *args, **kwargs):
+        try:
+            return await func(update, context, *args, **kwargs)
+        except Exception as e:
+            error_title = f"Ошибка в {func.__name__}"
+            error_details = traceback.format_exc()
+            
+            user_info = None
+            if update and update.effective_user:
+                user = update.effective_user
+                user_info = f"{user.first_name} (@{user.username}) ID: {user.id}"
+            
+            await send_error_notification(context, error_title, error_details, user_info)
+            raise e
+    return wrapper
 
 # === ИНИЦИАЛИЗАЦИЯ OPENROUTER ===
 def init_ai_client():
@@ -321,12 +385,12 @@ def format_worksheet(worksheet):
         ]
         
         status_colors = [
-            {"red": 0.8, "green": 0.9, "blue": 1.0},   # 1️⃣ Новый
-            {"red": 1.0, "green": 1.0, "blue": 0.7},   # 2️⃣ В процессе квалификации
-            {"red": 0.7, "green": 1.0, "blue": 0.7},   # 3️⃣ Готов к передаче
-            {"red": 1.0, "green": 0.9, "blue": 0.4},   # 4️⃣ Передан руководителю
-            {"red": 1.0, "green": 0.7, "blue": 0.7},   # 5️⃣ Негатив/Отказ
-            {"red": 0.6, "green": 0.6, "blue": 0.6}    # 6️⃣ Нецелевой
+            {"red": 0.8, "green": 0.9, "blue": 1.0},   # Новый
+            {"red": 1.0, "green": 1.0, "blue": 0.7},   # В процессе квалификации
+            {"red": 0.7, "green": 1.0, "blue": 0.7},   # Готов к передаче
+            {"red": 1.0, "green": 0.9, "blue": 0.4},   # Передан руководителю
+            {"red": 1.0, "green": 0.7, "blue": 0.7},   # Негатив/Отказ
+            {"red": 0.6, "green": 0.6, "blue": 0.6}    # Нецелевой
         ]
         
         for i, status in enumerate(CLIENT_STATUSES):
@@ -469,7 +533,7 @@ def get_client_note(user_id):
         return ""
 
 # === ЗАПИСЬ В ТАБЛИЦУ ===
-def log_to_sheets(user_id, username, first_name, message_text, status="1️⃣ Новый", summary=""):
+def log_to_sheets(user_id, username, first_name, message_text, status="Новый", summary=""):
     if not worksheet:
         return
     
@@ -509,22 +573,22 @@ def log_to_sheets(user_id, username, first_name, message_text, status="1️⃣ �
 # === ПОЛУЧИТЬ СТАТУС ===
 def get_client_status(user_id):
     if not worksheet:
-        return "1️⃣ Новый"
+        return "Новый"
     
     try:
         all_data = worksheet.get_all_values()
         if len(all_data) < 2:
-            return "1️⃣ Новый"
+            return "Новый"
         
         for i in range(len(all_data)-1, 0, -1):
             if len(all_data[i]) > 1 and all_data[i][1] == str(user_id):
                 if len(all_data[i]) >= 6:
                     return all_data[i][5]
-                return "1️⃣ Новый"
-        return "1️⃣ Новый"
+                return "Новый"
+        return "Новый"
     except Exception as e:
         logger.error(f"❌ Ошибка получения статуса: {e}")
-        return "1️⃣ Новый"
+        return "Новый"
 
 # === ПОЛУЧЕНИЕ СПИСКА ПОЛЬЗОВАТЕЛЕЙ ===
 def get_all_users_from_sheets():
@@ -642,6 +706,7 @@ async def get_or_create_topic(context, user_id, username, first_name):
         return None
 
 # === КОМАНДА /START ===
+@catch_errors
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     
@@ -656,7 +721,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Ошибка")
         return
     
-    log_to_sheets(user.id, user.username, user.first_name, "/start", status="1️⃣ Новый")
+    log_to_sheets(user.id, user.username, user.first_name, "/start", status="Новый")
     
     welcome_msg = f"Привет, {user.first_name}! 👋\n\nЯ помощник компании ADD production. Расскажи, какой у тебя проект и что именно ищешь? Мы помогаем с отделами продаж для онлайн-курсов."
     
@@ -672,6 +737,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_conversation_history[user.id] = []
 
 # === ОСНОВНОЙ ОБРАБОТЧИК СООБЩЕНИЙ (С ИИ) ===
+@catch_errors
 async def handle_client_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     
@@ -691,7 +757,7 @@ async def handle_client_message(update: Update, context: ContextTypes.DEFAULT_TY
     
     current_status = get_client_status(user_id)
     
-    if current_status in ["4️⃣ Передан руководителю 👤", "5️⃣ Негатив/Отказ", "6️⃣ Нецелевой"]:
+    if current_status in ["Передан руководителю 👤", "Негатив/Отказ", "Нецелевой"]:
         await message.reply_text("Спасибо за обращение! С вами уже связались или ваш запрос обработан.")
         return
     
@@ -705,8 +771,8 @@ async def handle_client_message(update: Update, context: ContextTypes.DEFAULT_TY
         summary = await generate_client_summary(user_id, user.first_name)
     
     if should_transfer:
-        update_client_status(user_id, "3️⃣ Готов к передаче")
-        current_status = "3️⃣ Готов к передаче"
+        update_client_status(user_id, "Готов к передаче")
+        current_status = "Готов к передаче"
         
         if summary:
             await context.bot.send_message(
@@ -736,6 +802,7 @@ async def handle_client_message(update: Update, context: ContextTypes.DEFAULT_TY
     )
 
 # === КОМАНДА СТАТУС ===
+@catch_errors
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
@@ -759,6 +826,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # === ОБРАБОТКА КНОПОК ===
+@catch_errors
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -801,6 +869,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("❌ Используй Reply на сообщение клиента")
 
 # === РАССЫЛКА ===
+@catch_errors
 async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
@@ -838,6 +907,7 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['broadcast_data'] = {'text': broadcast_text, 'users': users}
 
 # === ОБРАБОТКА РАССЫЛКИ ===
+@catch_errors
 async def broadcast_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -891,6 +961,7 @@ async def broadcast_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.user_data.pop('broadcast_data', None)
 
 # === КОМАНДА ЛОГОВ ===
+@catch_errors
 async def admin_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
@@ -904,6 +975,7 @@ async def admin_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Ошибка: {e}")
 
 # === ПРОВЕРКА SHEETS ===
+@catch_errors
 async def check_sheets(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
@@ -924,6 +996,7 @@ async def check_sheets(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Google Sheets не подключен")
 
 # === ОТВЕТЫ АДМИНА ===
+@catch_errors
 async def handle_admin_reply_in_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id != GROUP_ID or not update.effective_message.message_thread_id:
         return
@@ -941,6 +1014,7 @@ async def handle_admin_reply_in_topic(update: Update, context: ContextTypes.DEFA
     await message.reply_text("✅ Ответ отправлен")
 
 # === МЕДИА ===
+@catch_errors
 async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     
@@ -967,6 +1041,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await message.reply_text("✅ Файл получен!")
 
 # === СТАТИСТИКА ===
+@catch_errors
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
@@ -1046,6 +1121,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Ошибка при получении статистики")
 
 # === ЗАМЕТКИ ===
+@catch_errors
 async def note_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
@@ -1103,6 +1179,7 @@ async def note_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 # === ПОИСК ===
+@catch_errors
 async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
@@ -1157,6 +1234,7 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Ошибка при поиске")
 
 # === БЛОКИРОВКА ===
+@catch_errors
 async def ban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
@@ -1171,7 +1249,7 @@ async def ban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         blacklist.add(user_id)
         add_note_to_client(user_id, f"🚫 ЗАБЛОКИРОВАН. Причина: {reason}")
-        update_client_status(user_id, "5️⃣ Негатив/Отказ")
+        update_client_status(user_id, "Негатив/Отказ")
         
         if user_id in user_topics:
             topic_id = user_topics[user_id]
@@ -1186,6 +1264,7 @@ async def ban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("❌ Неверный ID")
 
+@catch_errors
 async def unban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
@@ -1216,6 +1295,7 @@ async def unban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("❌ Неверный ID")
 
+@catch_errors
 async def blacklist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
@@ -1257,7 +1337,7 @@ async def check_inactive_clients(context: ContextTypes.DEFAULT_TYPE):
             if len(row) >= 6 and row[1]:
                 user_id = row[1]
                 client_data[user_id] = {
-                    'status': row[5] if len(row) > 5 else "1️⃣ Новый",
+                    'status': row[5] if len(row) > 5 else "Новый",
                     'date': row[0] if len(row) > 0 else None
                 }
         
@@ -1265,7 +1345,7 @@ async def check_inactive_clients(context: ContextTypes.DEFAULT_TYPE):
         changed_count = 0
         
         for user_id, data in client_data.items():
-            if data['status'] in ["4️⃣ Передан руководителю 👤", "5️⃣ Негатив/Отказ", "6️⃣ Нецелевой"]:
+            if data['status'] in ["Передан руководителю 👤", "Негатив/Отказ", "Нецелевой"]:
                 continue
             
             if data['date']:
@@ -1274,7 +1354,7 @@ async def check_inactive_clients(context: ContextTypes.DEFAULT_TYPE):
                     days_inactive = (today - last_date).days
                     
                     if days_inactive >= 3:
-                        if update_client_status(int(user_id), "6️⃣ Нецелевой"):
+                        if update_client_status(int(user_id), "Нецелевой"):
                             changed_count += 1
                 except:
                     continue
@@ -1284,6 +1364,7 @@ async def check_inactive_clients(context: ContextTypes.DEFAULT_TYPE):
             
     except Exception as e:
         logger.error(f"❌ Ошибка проверки неактивных клиентов: {e}")
+        await send_error_notification(context, "Ошибка в check_inactive_clients", traceback.format_exc())
 
 # === ЕЖЕДНЕВНАЯ СТАТИСТИКА ===
 async def daily_stats(context: ContextTypes.DEFAULT_TYPE):
@@ -1343,10 +1424,14 @@ async def daily_stats(context: ContextTypes.DEFAULT_TYPE):
         
     except Exception as e:
         logger.error(f"❌ Ошибка отправки статистики: {e}")
+        await send_error_notification(context, "Ошибка в daily_stats", traceback.format_exc())
 
 # === ГЛАВНАЯ ===
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
+    
+    # Добавляем глобальный обработчик ошибок
+    app.add_error_handler(error_handler)
     
     # Основные команды
     app.add_handler(CommandHandler("start", start))
@@ -1365,10 +1450,23 @@ def main():
     app.add_handler(CallbackQueryHandler(button_callback, pattern="^status_"))
     app.add_handler(CallbackQueryHandler(broadcast_callback, pattern="^broadcast_"))
     
-    # Обработчики сообщений
-    app.add_handler(MessageHandler(filters.Chat(GROUP_ID) & filters.TEXT & ~filters.COMMAND, handle_admin_reply_in_topic))
-    app.add_handler(MessageHandler(~filters.Chat(ADMIN_ID) & (filters.PHOTO | filters.VIDEO | filters.Document.ALL | filters.VOICE), handle_media))
-    app.add_handler(MessageHandler(~filters.Chat(ADMIN_ID) & filters.TEXT & ~filters.COMMAND, handle_client_message))
+    # 👇 Сначала обрабатываем ответы админа из группы
+    app.add_handler(MessageHandler(
+        filters.Chat(GROUP_ID) & filters.TEXT & ~filters.COMMAND, 
+        handle_admin_reply_in_topic
+    ))
+    
+    # 👇 ПОТОМ обрабатываем медиа от всех, кроме админа
+    app.add_handler(MessageHandler(
+        ~filters.Chat(ADMIN_ID) & (filters.PHOTO | filters.VIDEO | filters.Document.ALL | filters.VOICE), 
+        handle_media
+    ))
+    
+    # 👇 И ТОЛЬКО ПОТОМ обрабатываем текст от всех, кроме админа
+    app.add_handler(MessageHandler(
+        ~filters.Chat(ADMIN_ID) & filters.TEXT & ~filters.COMMAND, 
+        handle_client_message
+    ))
     
     # Планировщик задач
     job_queue = app.job_queue

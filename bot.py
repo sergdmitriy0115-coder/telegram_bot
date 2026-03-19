@@ -22,9 +22,9 @@ LOG_FILE = "logs.txt"
 # --- НАСТРОЙКИ ДЛЯ ОТПРАВКИ ОШИБОК ---
 ERROR_LOG_CHAT = 7675037573  # ТВОЙ ID (числом, не строкой!)
 
-# --- НАСТРОЙКИ VseGPT (РОССИЙСКИЙ AI) ---
-VSEGPT_API_KEY = os.environ.get('VSEGPT_API_KEY')
-AI_MODEL = "google/gemini-pro"  # Модель Gemini
+# --- НАСТРОЙКИ GPTUNNEL (РОССИЙСКИЙ AI) ---
+GPTUNNEL_API_KEY = os.environ.get('GPTUNNEL_API_KEY')
+AI_MODEL = "gpt-3.5-turbo"  # Модель через GPTunnel
 
 # --- НАСТРОЙКИ GOOGLE SHEETS (ТВОЯ ТАБЛИЦА) ---
 SPREADSHEET_ID = "15vlEZ0Q6OmQh51DsA9B_fgiLwed12ekroz1aeWsgXVI"
@@ -152,19 +152,20 @@ def catch_errors(func):
                 pass
     return wrapper
 
-# === ИНИЦИАЛИЗАЦИЯ VseGPT ===
+# === ИНИЦИАЛИЗАЦИЯ GPTUNNEL ===
 def init_ai_client():
-    if not VSEGPT_API_KEY:
-        logger.warning("⚠️ VSEGPT_API_KEY не задан, ИИ-функции будут отключены")
+    """Инициализирует клиент для GPTunnel (российский AI)"""
+    if not GPTUNNEL_API_KEY:
+        logger.warning("⚠️ GPTUNNEL_API_KEY не задан, ИИ-функции будут отключены")
         return None
     
     try:
         client = OpenAI(
-            base_url="https://api.vsegpt.ru/v1",
-            api_key=VSEGPT_API_KEY,
+            base_url="https://api.gptunnel.ru/v1",
+            api_key=GPTUNNEL_API_KEY,
             default_headers={}
         )
-        logger.info(f"✅ AI клиент (VseGPT) инициализирован, модель: {AI_MODEL}")
+        logger.info(f"✅ AI клиент (GPTunnel) инициализирован, модель: {AI_MODEL}")
         return client
     except Exception as e:
         logger.error(f"❌ Ошибка инициализации AI: {e}")
@@ -306,7 +307,7 @@ def format_worksheet(worksheet):
                         "sheetId": sheet_id,
                         "dimension": "COLUMNS",
                         "startIndex": 0,
-                        "endIndex": 8
+                        "endIndex": 7
                     }
                 }
             },
@@ -317,7 +318,7 @@ def format_worksheet(worksheet):
                         "startRowIndex": 0,
                         "endRowIndex": worksheet.row_count,
                         "startColumnIndex": 0,
-                        "endColumnIndex": 8
+                        "endColumnIndex": 7
                     },
                     "top": {"style": "SOLID", "color": {"red": 0, "green": 0, "blue": 0}},
                     "bottom": {"style": "SOLID", "color": {"red": 0, "green": 0, "blue": 0}},

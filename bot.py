@@ -10,29 +10,57 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+from openai import OpenAI
 
-# --- НАСТРОЙКИ ---
+# --- НАСТРОЙКИ (ТВОИ ДАННЫЕ) ---
 BOT_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 ADMIN_ID = 7675037573  # ТВОЙ ID
 GROUP_ID = -1003743707530  # ID ТВОЕЙ ГРУППЫ С ТЕМАМИ
 LOG_FILE = "logs.txt"
 
-# --- НАСТРОЙКИ GOOGLE SHEETS ---
+# --- НАСТРОЙКИ OPENROUTER / DEEPSEEK ---
+OPENROUTER_API_KEY = os.environ.get('OPENROUTER_API_KEY')
+AI_MODEL = "deepseek/deepseek-r1:free"  # Бесплатная модель
+
+# --- НАСТРОЙКИ GOOGLE SHEETS (ТВОЯ ТАБЛИЦА) ---
 SPREADSHEET_ID = "15vlEZ0Q6OmQh51DsA9B_fgiLwed12ekroz1aeWsgXVI"
 WORKSHEET_NAME = "Логи клиентов"
 
 # Статусы для клиентов
 CLIENT_STATUSES = [
     "1️⃣ Новый",
-    "2️⃣ Думает", 
-    "3️⃣ В работе",
-    "4️⃣ Завершён",
-    "5️⃣ Отказ",
-    "6️⃣ Удалил переписку"
+    "2️⃣ В процессе квалификации", 
+    "3️⃣ Готов к передаче",
+    "4️⃣ Передан руководителю 👤",
+    "5️⃣ Негатив/Отказ",
+    "6️⃣ Нецелевой"
 ]
+
+# Контакты руководителей
+MANAGER_CONTACTS = [
+    "@Darya_Pril06",
+    "@anny_nizh"
+]
+
+# Информация о компании (с сайта)
+COMPANY_INFO = """
+ADD production - компания, которая предоставляет отдел продаж для онлайн-курсов и инфопродуктов.
+
+Что мы делаем:
+- Разрабатываем скрипты и стратегии продаж
+- Предоставляем топ-менеджеров с опытом в инфопродуктах
+- Делаем анализ продаж и ежедневную отчётность
+- Работаем за процент от прибыли
+- Есть опыт работы с разными нишами
+
+Сайт: https://add.production.tilda.ws
+"""
 
 # Хранилища
 user_topics = {}
+blacklist = set()
+user_conversation_history = {}
+user_info_collected = {}
 
 # --- Логирование ---
 logging.basicConfig(
@@ -41,7 +69,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# === ВЕБ-СЕРВЕР ===
+# === ВЕБ-СЕРВЕР ДЛЯ RENDER ===
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -57,14 +85,164 @@ def run_health_server():
     except Exception as e:
         logger.error(f"Health server error: {e}")
 
+# === ИНИЦИАЛИЗАЦИЯ OPENROUTER ===
+def init_ai_client():
+    if not OPENROUTER_API_KEY:
+        logger.warning("⚠️ OPENROUTER_API_KEY не задан, ИИ-функции будут отключены")
+        return None
+    
+    try:
+        client = OpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=OPENROUTER_API_KEY,
+            default_headers={
+                "HTTP-Referer": "https://github.com/your-bot",
+                "X-Title": "ADD Production Qualification Bot",
+            }
+        )
+        logger.info(f"✅ AI клиент инициализирован, модель: {AI_MODEL}")
+        return client
+    except Exception as e:
+        logger.error(f"❌ Ошибка инициализации AI: {e}")
+        return None
+
+ai_client = init_ai_client()
+
+# === ФУНКЦИЯ ДЛЯ ГЕНЕРАЦИИ ВЫЖИМКИ О КЛИЕНТЕ ===
+async def generate_client_summary(user_id, user_name):
+    """Генерирует краткую выжимку о клиенте на основе истории диалога"""
+    
+    if not ai_client:
+        return "📝 Выжимка недоступна (AI не подключен)"
+    
+    history = user_conversation_history.get(user_id, [])
+    if len(history) < 2:
+        return "📝 Недостаточно данных для анализа"
+    
+    summary_prompt = f"""На основе диалога с потенциальным клиентом {user_name} составь краткую выжимку (3-5 предложений) по следующим пунктам:
+
+- Ниша клиента (какой у него продукт/курс)
+- Оборот (текущий или ожидаемый)
+- Проблема, которую хочет решить (почему ищет отдел продаж)
+- Откуда узнал о нас
+- Тон клиента (дружелюбный, негативный, сомневающийся и т.д.)
+- Готовность к сотрудничеству
+
+Диалог:
+"""
+    
+    recent_history = history[-20:] if len(history) > 20 else history
+    for msg in recent_history:
+        role = "Клиент" if msg["role"] == "user" else "Бот"
+        summary_prompt += f"{role}: {msg['content']}\n"
+    
+    summary_prompt += "\nВыжимка:"
+    
+    try:
+        response = ai_client.chat.completions.create(
+            model=AI_MODEL,
+            messages=[{"role": "user", "content": summary_prompt}],
+            temperature=0.3,
+            max_tokens=300
+        )
+        summary = response.choices[0].message.content.strip()
+        return f"📊 **Выжимка о клиенте:**\n{summary}"
+    except Exception as e:
+        logger.error(f"❌ Ошибка генерации выжимки: {e}")
+        return "📝 Ошибка при анализе диалога"
+
+# === ФУНКЦИЯ ДЛЯ ГЕНЕРАЦИИ ОТВЕТА ИИ ===
+async def generate_ai_response(user_id, user_message, user_name):
+    """Генерирует ответ от ИИ для квалификации клиента"""
+    
+    if not ai_client:
+        return "Спасибо за обращение! С вами свяжется наш руководитель."
+    
+    history = user_conversation_history.get(user_id, [])
+    if len(history) > 10:
+        history = history[-10:]
+    
+    system_prompt = f"""Ты — виртуальный ассистент компании ADD production. Твоя задача — квалифицировать потенциальных клиентов (продюсеров, экспертов, владельцев онлайн-школ), которые ищут отдел продаж для своих проектов.
+
+**ВАЖНО: ТЫ НИЧЕГО НЕ ПРОДАЁШЬ!** Твоя цель — только собрать информацию и передать клиента руководителю.
+
+**ИНФОРМАЦИЯ О КОМПАНИИ (используй для ответов):**
+{COMPANY_INFO}
+
+**ЧТО НУЖНО УЗНАТЬ У КЛИЕНТА:**
+1. Ниша — какой у него продукт/курс/услуга
+2. Оборот — текущий или ожидаемый (примерно)
+3. Проблема — почему ищет отдел продаж, что не устраивает
+4. Откуда узнал о нас
+5. Готовность к сотрудничеству
+
+**СТИЛЬ ОБЩЕНИЯ:**
+- Общайся на "ты", дружелюбно, но профессионально
+- Используй эмодзи 😊, но умеренно
+- Задавай уточняющие вопросы естественно
+- Не будь навязчивым
+- Не пиши длинных текстов (2-3 предложения)
+
+**ПРАВИЛА:**
+- НИКОГДА не предлагай цены, услуги, коммерческие предложения
+- Если клиент агрессивен или недоволен → сразу передавай руководителю
+- Если клиент чётко описал потребность → предложи передать руководителю для созвона
+- НИКОГДА не признавайся, что ты ИИ
+
+**ПРИМЕРЫ ДИАЛОГА:**
+Клиент: "Здравствуйте, ищу отдел продаж для своего курса"
+Ты: "Привет! 👋 Расскажи подробнее про твой курс. Какая ниша, какой примерно оборот?"
+
+Клиент: "Нужна помощь с продажами, текущие менеджеры не справляются"
+Ты: "Понял. А в чём именно проблема? Какие результаты сейчас и что хочешь улучшить?"
+
+Клиент: "Это всё бесполезно, у вас наверное дорого"
+Ты: "Я передаю твой запрос руководителю, он сможет подробно ответить на все вопросы и обсудить возможные варианты. Контакты: {contacts}"
+
+Имя клиента: {user_name}
+Контакты руководителей: {', '.join(MANAGER_CONTACTS)}
+"""
+    
+    messages = [{"role": "system", "content": system_prompt.format(
+        COMPANY_INFO=COMPANY_INFO,
+        user_name=user_name,
+        contacts=', '.join(MANAGER_CONTACTS)
+    )}]
+    
+    for msg in history:
+        messages.append(msg)
+    messages.append({"role": "user", "content": user_message})
+    
+    try:
+        response = ai_client.chat.completions.create(
+            model=AI_MODEL,
+            messages=messages,
+            temperature=0.7,
+            max_tokens=500,
+            top_p=0.9
+        )
+        
+        ai_answer = response.choices[0].message.content.strip()
+        
+        user_conversation_history.setdefault(user_id, []).append(
+            {"role": "user", "content": user_message}
+        )
+        user_conversation_history.setdefault(user_id, []).append(
+            {"role": "assistant", "content": ai_answer}
+        )
+        
+        return ai_answer
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка генерации AI ответа: {e}")
+        return "Извини, техническая заминка. Я передам твой запрос руководителю, он свяжется с тобой."
+
 # === ФОРМАТИРОВАНИЕ ТАБЛИЦЫ ===
 def format_worksheet(worksheet):
-    """Делает таблицу красивой: Arial 11, жирные границы, авторасширение"""
     try:
         sheet_id = worksheet.id
         
         requests = [
-            # Шрифт Arial 11 для всей таблицы
             {
                 "repeatCell": {
                     "range": {
@@ -83,7 +261,6 @@ def format_worksheet(worksheet):
                     "fields": "userEnteredFormat.textFormat(fontFamily,fontSize)"
                 }
             },
-            # Жирный шрифт и заливка для заголовков
             {
                 "repeatCell": {
                     "range": {
@@ -105,18 +282,16 @@ def format_worksheet(worksheet):
                     "fields": "userEnteredFormat(textFormat,backgroundColor,horizontalAlignment)"
                 }
             },
-            # Авто-ширина для всех колонок
             {
                 "autoResizeDimensions": {
                     "dimensions": {
                         "sheetId": sheet_id,
                         "dimension": "COLUMNS",
                         "startIndex": 0,
-                        "endIndex": 7  # 7 колонок (добавили Заметки)
+                        "endIndex": 8
                     }
                 }
             },
-            # Жирные границы
             {
                 "updateBorders": {
                     "range": {
@@ -124,7 +299,7 @@ def format_worksheet(worksheet):
                         "startRowIndex": 0,
                         "endRowIndex": worksheet.row_count,
                         "startColumnIndex": 0,
-                        "endColumnIndex": 7
+                        "endColumnIndex": 8
                     },
                     "top": {"style": "SOLID_MEDIUM", "color": {"red": 0, "green": 0, "blue": 0}},
                     "bottom": {"style": "SOLID_MEDIUM", "color": {"red": 0, "green": 0, "blue": 0}},
@@ -134,7 +309,6 @@ def format_worksheet(worksheet):
                     "innerVertical": {"style": "SOLID_MEDIUM", "color": {"red": 0, "green": 0, "blue": 0}}
                 }
             },
-            # Фиксация заголовков
             {
                 "updateSheetProperties": {
                     "properties": {
@@ -146,14 +320,13 @@ def format_worksheet(worksheet):
             }
         ]
         
-        # Цветные плашки для статусов
         status_colors = [
             {"red": 0.8, "green": 0.9, "blue": 1.0},   # 1️⃣ Новый
-            {"red": 1.0, "green": 1.0, "blue": 0.7},   # 2️⃣ Думает
-            {"red": 0.7, "green": 1.0, "blue": 0.7},   # 3️⃣ В работе
-            {"red": 0.9, "green": 0.9, "blue": 0.9},   # 4️⃣ Завершён
-            {"red": 1.0, "green": 0.7, "blue": 0.7},   # 5️⃣ Отказ
-            {"red": 0.6, "green": 0.6, "blue": 0.6}    # 6️⃣ Удалил
+            {"red": 1.0, "green": 1.0, "blue": 0.7},   # 2️⃣ В процессе квалификации
+            {"red": 0.7, "green": 1.0, "blue": 0.7},   # 3️⃣ Готов к передаче
+            {"red": 1.0, "green": 0.9, "blue": 0.4},   # 4️⃣ Передан руководителю
+            {"red": 1.0, "green": 0.7, "blue": 0.7},   # 5️⃣ Негатив/Отказ
+            {"red": 0.6, "green": 0.6, "blue": 0.6}    # 6️⃣ Нецелевой
         ]
         
         for i, status in enumerate(CLIENT_STATUSES):
@@ -163,7 +336,7 @@ def format_worksheet(worksheet):
                         "ranges": [{
                             "sheetId": sheet_id,
                             "startRowIndex": 1,
-                            "startColumnIndex": 5,  # колонка F (Status)
+                            "startColumnIndex": 5,
                             "endColumnIndex": 6
                         }],
                         "booleanRule": {
@@ -214,7 +387,7 @@ def update_client_status(user_id, new_status):
                 break
         
         if last_row_index:
-            worksheet.update_cell(last_row_index, 6, new_status)  # колонка F
+            worksheet.update_cell(last_row_index, 6, new_status)
             logger.info(f"✅ Статус для user {user_id} обновлён на {new_status}")
             return True
         return False
@@ -222,9 +395,8 @@ def update_client_status(user_id, new_status):
         logger.error(f"❌ Ошибка обновления статуса: {e}")
         return False
 
-# === ДОБАВЛЕНИЕ ЗАМЕТКИ ===
-def add_note_to_client(user_id, note):
-    """Добавляет заметку к клиенту в колонку G"""
+# === ОБНОВЛЕНИЕ ВЫЖИМКИ ===
+def update_client_summary(user_id, summary):
     if not worksheet:
         return False
     
@@ -240,16 +412,39 @@ def add_note_to_client(user_id, note):
                 break
         
         if last_row_index:
-            # Получаем текущую заметку
+            worksheet.update_cell(last_row_index, 8, summary)
+            logger.info(f"✅ Выжимка обновлена для user {user_id}")
+            return True
+        return False
+    except Exception as e:
+        logger.error(f"❌ Ошибка обновления выжимки: {e}")
+        return False
+
+# === ДОБАВЛЕНИЕ ЗАМЕТКИ ===
+def add_note_to_client(user_id, note):
+    if not worksheet:
+        return False
+    
+    try:
+        all_data = worksheet.get_all_values()
+        if len(all_data) < 2:
+            return False
+        
+        last_row_index = None
+        for i in range(len(all_data)-1, 0, -1):
+            if len(all_data[i]) > 1 and all_data[i][1] == str(user_id):
+                last_row_index = i + 1
+                break
+        
+        if last_row_index:
             current_note = ""
             if len(all_data[last_row_index-1]) >= 7:
                 current_note = all_data[last_row_index-1][6]
             
-            # Добавляем новую заметку с датой
             timestamp = datetime.now().strftime("%d.%m %H:%M")
             new_note = f"{current_note}\n[{timestamp}] {note}".strip()
             
-            worksheet.update_cell(last_row_index, 7, new_note)  # колонка G
+            worksheet.update_cell(last_row_index, 7, new_note)
             logger.info(f"✅ Заметка добавлена для user {user_id}")
             return True
         return False
@@ -274,7 +469,7 @@ def get_client_note(user_id):
         return ""
 
 # === ЗАПИСЬ В ТАБЛИЦУ ===
-def log_to_sheets(user_id, username, first_name, message_text, status="1️⃣ Новый"):
+def log_to_sheets(user_id, username, first_name, message_text, status="1️⃣ Новый", summary=""):
     if not worksheet:
         return
     
@@ -288,12 +483,12 @@ def log_to_sheets(user_id, username, first_name, message_text, status="1️⃣ �
                 first_name or "нет",
                 message_text,
                 status,
-                ""  # пустая колонка для заметок
+                "",
+                summary
             ]
             worksheet.append_row(row)
             logger.info(f"✅ Новая запись для user {user_id}")
             
-            # Форматируем при первом добавлении
             try:
                 props = worksheet.spreadsheet.fetch_sheet_metadata(
                     fields="sheets.properties.gridProperties.frozenRowCount"
@@ -305,6 +500,8 @@ def log_to_sheets(user_id, username, first_name, message_text, status="1️⃣ �
                 pass
         else:
             update_client_status(user_id, status)
+            if summary:
+                update_client_summary(user_id, summary)
             
     except Exception as e:
         logger.error(f"❌ Ошибка записи: {e}")
@@ -350,210 +547,6 @@ def get_all_users_from_sheets():
         logger.error(f"❌ Ошибка получения списка: {e}")
         return []
 
-# === СТАТИСТИКА ===
-async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает статистику по клиентам"""
-    if update.effective_user.id != ADMIN_ID:
-        return
-    
-    if not worksheet:
-        await update.message.reply_text("❌ Таблица не подключена")
-        return
-    
-    try:
-        all_data = worksheet.get_all_values()
-        if len(all_data) < 2:
-            await update.message.reply_text("📭 Нет данных")
-            return
-        
-        # Общая статистика
-        total_clients = len(set(row[1] for row in all_data[1:] if len(row) > 1))
-        
-        # Статистика по статусам
-        status_counts = {status: 0 for status in CLIENT_STATUSES}
-        last_statuses = {}
-        
-        # Ищем последний статус для каждого клиента
-        for row in reversed(all_data[1:]):
-            if len(row) >= 6 and row[1] not in last_statuses:
-                last_statuses[row[1]] = row[5]
-        
-        for status in last_statuses.values():
-            if status in status_counts:
-                status_counts[status] += 1
-        
-        # Статистика за сегодня/неделю/месяц
-        today = datetime.now().date()
-        week_ago = today - timedelta(days=7)
-        month_ago = today - timedelta(days=30)
-        
-        today_count = 0
-        week_count = 0
-        month_count = 0
-        
-        for row in all_data[1:]:
-            if len(row) >= 1 and row[0]:
-                try:
-                    msg_date = datetime.strptime(row[0].split()[0], "%Y-%m-%d").date()
-                    if msg_date == today:
-                        today_count += 1
-                    if msg_date >= week_ago:
-                        week_count += 1
-                    if msg_date >= month_ago:
-                        month_count += 1
-                except:
-                    continue
-        
-        # Формируем ответ
-        text = "📊 **СТАТИСТИКА**\n\n"
-        text += f"👥 **Всего клиентов:** {total_clients}\n\n"
-        text += "**По статусам:**\n"
-        for status in CLIENT_STATUSES:
-            count = status_counts.get(status, 0)
-            text += f"{status}: {count}\n"
-        
-        text += f"\n📅 **Активность:**\n"
-        text += f"• За сегодня: {today_count} сообщ.\n"
-        text += f"• За неделю: {week_count} сообщ.\n"
-        text += f"• За месяц: {month_count} сообщ.\n"
-        
-        # Активные клиенты (писали сегодня)
-        active_today = set()
-        for row in all_data[1:]:
-            if len(row) >= 2 and row[0]:
-                try:
-                    msg_date = datetime.strptime(row[0].split()[0], "%Y-%m-%d").date()
-                    if msg_date == today:
-                        active_today.add(row[1])
-                except:
-                    continue
-        
-        text += f"\n🔥 **Активных сегодня:** {len(active_today)} клиентов"
-        
-        await update.message.reply_text(text)
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка статистики: {e}")
-        await update.message.reply_text("❌ Ошибка при получении статистики")
-
-# === ЗАМЕТКИ ===
-async def note_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Добавляет заметку к клиенту /note ID текст или через Reply"""
-    if update.effective_user.id != ADMIN_ID:
-        return
-    
-    message = update.message
-    
-    # Вариант 1: через Reply
-    if message.reply_to_message:
-        original_text = message.reply_to_message.text or ""
-        match = re.search(r'ID: `?(\d+)`?', original_text)
-        
-        if not match:
-            await message.reply_text("❌ Не могу найти ID клиента")
-            return
-        
-        client_id = int(match.group(1))
-        note_text = " ".join(context.args) if context.args else "Без текста"
-        
-        if add_note_to_client(client_id, note_text):
-            await message.reply_text(f"✅ Заметка добавлена к клиенту {client_id}")
-            
-            # Отправляем уведомление в тему
-            if client_id in user_topics:
-                topic_id = user_topics[client_id]
-                await context.bot.send_message(
-                    chat_id=GROUP_ID,
-                    message_thread_id=topic_id,
-                    text=f"📝 **Новая заметка:**\n{note_text}"
-                )
-        else:
-            await message.reply_text("❌ Ошибка при добавлении заметки")
-    
-    # Вариант 2: /note ID текст
-    elif len(context.args) >= 2:
-        try:
-            client_id = int(context.args[0])
-            note_text = " ".join(context.args[1:])
-            
-            if add_note_to_client(client_id, note_text):
-                await message.reply_text(f"✅ Заметка добавлена к клиенту {client_id}")
-                
-                if client_id in user_topics:
-                    topic_id = user_topics[client_id]
-                    await context.bot.send_message(
-                        chat_id=GROUP_ID,
-                        message_thread_id=topic_id,
-                        text=f"📝 **Новая заметка:**\n{note_text}"
-                    )
-            else:
-                await message.reply_text("❌ Ошибка при добавлении заметки")
-        except ValueError:
-            await message.reply_text("❌ Неверный формат. Используй: /note ID текст")
-    else:
-        await message.reply_text(
-            "📝 **Как добавить заметку:**\n"
-            "1. Ответь на сообщение клиента: `/note текст`\n"
-            "2. Или напиши: `/note ID текст`"
-        )
-
-# === ПОИСК ===
-async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Ищет по сообщениям клиентов"""
-    if update.effective_user.id != ADMIN_ID:
-        return
-    
-    if not context.args:
-        await update.message.reply_text("🔍 Используй: /search текст")
-        return
-    
-    search_text = " ".join(context.args).lower()
-    
-    if not worksheet:
-        await update.message.reply_text("❌ Таблица не подключена")
-        return
-    
-    try:
-        all_data = worksheet.get_all_values()
-        if len(all_data) < 2:
-            await update.message.reply_text("📭 Нет данных")
-            return
-        
-        results = []
-        for row in all_data[1:]:
-            if len(row) >= 5 and search_text in row[4].lower():
-                timestamp = row[0] if len(row) > 0 else "?"
-                username = row[2] if len(row) > 2 else "?"
-                message = row[4][:100] + "..." if len(row[4]) > 100 else row[4]
-                
-                results.append(f"• {timestamp} | {username}: {message}")
-        
-        if not results:
-            await update.message.reply_text("🔍 Ничего не найдено")
-            return
-        
-        # Разбиваем на части если много результатов
-        text = f"🔍 **Найдено {len(results)} совпадений:**\n\n"
-        
-        if len(results) > 20:
-            results = results[:20]
-            text += "(показаны первые 20)\n\n"
-        
-        for i, res in enumerate(results, 1):
-            text += f"{i}. {res}\n"
-        
-        # Разбиваем длинные сообщения
-        if len(text) > 4000:
-            parts = [text[i:i+4000] for i in range(0, len(text), 4000)]
-            for part in parts:
-                await update.message.reply_text(part)
-        else:
-            await update.message.reply_text(text)
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка поиска: {e}")
-        await update.message.reply_text("❌ Ошибка при поиске")
-
 # === ИНИЦИАЛИЗАЦИЯ GOOGLE SHEETS ===
 def init_google_sheets():
     logger.info("🔄 Подключение к Google Sheets...")
@@ -575,9 +568,8 @@ def init_google_sheets():
             worksheet = spreadsheet.worksheet(WORKSHEET_NAME)
             logger.info("✅ Лист найден")
             
-            # Проверяем заголовки
             headers = worksheet.row_values(1)
-            new_headers = ["Timestamp", "User ID", "Ник клиента", "Имя", "Сообщение", "Статус", "Заметки"]
+            new_headers = ["Timestamp", "User ID", "Ник клиента", "Имя", "Сообщение", "Статус", "Заметки", "Выжимка"]
             
             if headers != new_headers:
                 logger.info("🔄 Обновляем заголовки")
@@ -587,8 +579,8 @@ def init_google_sheets():
             
         except gspread.exceptions.WorksheetNotFound:
             logger.info("🔄 Создаём новый лист")
-            worksheet = spreadsheet.add_worksheet(title=WORKSHEET_NAME, rows=1000, cols=7)
-            headers = ["Timestamp", "User ID", "Ник клиента", "Имя", "Сообщение", "Статус", "Заметки"]
+            worksheet = spreadsheet.add_worksheet(title=WORKSHEET_NAME, rows=1000, cols=8)
+            headers = ["Timestamp", "User ID", "Ник клиента", "Имя", "Сообщение", "Статус", "Заметки", "Выжимка"]
             worksheet.append_row(headers)
             format_worksheet(worksheet)
         
@@ -599,9 +591,6 @@ def init_google_sheets():
         logger.error(f"❌ Ошибка: {e}")
         return None
 
-# Инициализация
-worksheet = init_google_sheets()
-
 # === СОХРАНЕНИЕ В ФАЙЛ ===
 def save_message(user_id, username, first_name, text, is_from_admin=False):
     try:
@@ -611,6 +600,9 @@ def save_message(user_id, username, first_name, text, is_from_admin=False):
             f.write(f"[{now}] {sender} | ID: {user_id} | @{username} | {first_name}: {text}\n")
     except Exception as e:
         logger.error(f"Log error: {e}")
+
+# === ИНИЦИАЛИЗАЦИЯ ===
+worksheet = init_google_sheets()
 
 # === СОЗДАНИЕ ТЕМЫ ===
 async def get_or_create_topic(context, user_id, username, first_name):
@@ -633,6 +625,9 @@ async def get_or_create_topic(context, user_id, username, first_name):
         welcome_text += f"ID: `{user_id}`\n"
         welcome_text += f"Статус: {current_status}\n"
         
+        if user_id in blacklist:
+            welcome_text += f"\n🚫 **Клиент в ЧЕРНОМ СПИСКЕ!**\n"
+        
         if current_note:
             welcome_text += f"\n📝 **Заметки:**\n{current_note}"
         
@@ -649,6 +644,11 @@ async def get_or_create_topic(context, user_id, username, first_name):
 # === КОМАНДА /START ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    
+    if user.id in blacklist:
+        await update.message.reply_text("⛔ Вы заблокированы в этом боте.")
+        return
+    
     save_message(user.id, user.username or "нет", user.first_name or "нет", "/start")
     
     topic_id = await get_or_create_topic(context, user.id, user.username, user.first_name)
@@ -658,14 +658,27 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     log_to_sheets(user.id, user.username, user.first_name, "/start", status="1️⃣ Новый")
     
-    await update.message.reply_text(
-        f"Здравствуйте, {user.first_name}! 👋\n\nПодскажите, по какому вопросу хотели бы к нам обратиться?"
+    welcome_msg = f"Привет, {user.first_name}! 👋\n\nЯ помощник компании ADD production. Расскажи, какой у тебя проект и что именно ищешь? Мы помогаем с отделами продаж для онлайн-курсов."
+    
+    await update.message.reply_text(welcome_msg)
+    
+    await context.bot.send_message(
+        chat_id=GROUP_ID, 
+        message_thread_id=topic_id, 
+        text="👤 Клиент начал диалог. ИИ-помощник активен."
     )
-    await context.bot.send_message(chat_id=GROUP_ID, message_thread_id=topic_id, text="👤 Клиент начал диалог.")
+    
+    if user.id not in user_conversation_history:
+        user_conversation_history[user.id] = []
 
-# === СООБЩЕНИЯ КЛИЕНТОВ ===
+# === ОСНОВНОЙ ОБРАБОТЧИК СООБЩЕНИЙ (С ИИ) ===
 async def handle_client_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    
+    if user.id in blacklist:
+        await update.message.reply_text("⛔ Вы заблокированы в этом боте.")
+        return
+    
     message = update.message
     user_id = user.id
     
@@ -677,22 +690,50 @@ async def handle_client_message(update: Update, context: ContextTypes.DEFAULT_TY
         return
     
     current_status = get_client_status(user_id)
+    
+    if current_status in ["4️⃣ Передан руководителю 👤", "5️⃣ Негатив/Отказ", "6️⃣ Нецелевой"]:
+        await message.reply_text("Спасибо за обращение! С вами уже связались или ваш запрос обработан.")
+        return
+    
+    ai_response = await generate_ai_response(user_id, message.text, user.first_name)
+    
+    transfer_keywords = ["передаю руководителю", "свяжется руководитель", "передам твой запрос", "контакты руководителей"]
+    should_transfer = any(keyword in ai_response.lower() for keyword in transfer_keywords)
+    
+    summary = ""
+    if should_transfer or len(user_conversation_history.get(user_id, [])) > 10:
+        summary = await generate_client_summary(user_id, user.first_name)
+    
+    if should_transfer:
+        update_client_status(user_id, "3️⃣ Готов к передаче")
+        current_status = "3️⃣ Готов к передаче"
+        
+        if summary:
+            await context.bot.send_message(
+                chat_id=GROUP_ID,
+                message_thread_id=topic_id,
+                text=summary
+            )
+        
+        await context.bot.send_message(
+            chat_id=GROUP_ID,
+            message_thread_id=topic_id,
+            text=f"🤖 **Клиент готов к передаче!**\nКонтакты руководителей: {', '.join(MANAGER_CONTACTS)}"
+        )
+    
+    await message.reply_text(ai_response)
+    
+    log_to_sheets(user_id, user.username, user.first_name, message.text, status=current_status, summary=summary)
+    
     current_note = get_client_note(user_id)
-    
-    log_to_sheets(user_id, user.username, user.first_name, message.text, status=current_status)
-    
     note_text = f"\n\n📝 **Заметка:** {current_note}" if current_note else ""
+    summary_text = f"\n\n📊 **Выжимка:** {summary}" if summary else ""
+    
     await context.bot.send_message(
         chat_id=GROUP_ID, 
         message_thread_id=topic_id, 
-        text=f"👤 **Клиент:**\n{message.text}\n\n**Статус:** {current_status}{note_text}"
+        text=f"👤 **Клиент:**\n{message.text}\n\n🤖 **Ответ ИИ:**\n{ai_response}\n\n**Статус:** {current_status}{note_text}{summary_text}"
     )
-    
-    # Автоответы
-    if "цен" in message.text.lower() or "стоимост" in message.text.lower():
-        await message.reply_text("💰 Подробную информацию по ценам можете уточнить у нашего менеджера!")
-    else:
-        await message.reply_text("Спасибо за сообщение! Скоро ответим.")
 
 # === КОМАНДА СТАТУС ===
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -777,8 +818,10 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     users = get_all_users_from_sheets()
+    users = [u for u in users if u not in blacklist]
+    
     if not users:
-        await message.reply_text("📭 Нет пользователей")
+        await message.reply_text("📭 Нет пользователей для рассылки")
         return
     
     await message.reply_text(
@@ -867,9 +910,14 @@ async def check_sheets(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if worksheet:
         users_count = len(get_all_users_from_sheets())
+        blacklist_count = len(blacklist)
+        ai_status = "✅ Работает" if ai_client else "❌ Не подключен (проверь OPENROUTER_API_KEY)"
+        
         await update.message.reply_text(
             f"✅ **Google Sheets подключен**\n"
             f"📊 Всего клиентов: {users_count}\n"
+            f"🚫 В черном списке: {blacklist_count}\n"
+            f"🤖 AI статус: {ai_status}\n"
             f"📋 Название листа: {WORKSHEET_NAME}"
         )
     else:
@@ -895,6 +943,11 @@ async def handle_admin_reply_in_topic(update: Update, context: ContextTypes.DEFA
 # === МЕДИА ===
 async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    
+    if user.id in blacklist:
+        await update.message.reply_text("⛔ Вы заблокированы в этом боте.")
+        return
+    
     message = update.message
     
     topic_id = await get_or_create_topic(context, user.id, user.username, user.first_name)
@@ -913,6 +966,384 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await message.forward(chat_id=GROUP_ID, message_thread_id=topic_id)
     await message.reply_text("✅ Файл получен!")
 
+# === СТАТИСТИКА ===
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    
+    if not worksheet:
+        await update.message.reply_text("❌ Таблица не подключена")
+        return
+    
+    try:
+        all_data = worksheet.get_all_values()
+        if len(all_data) < 2:
+            await update.message.reply_text("📭 Нет данных")
+            return
+        
+        total_clients = len(set(row[1] for row in all_data[1:] if len(row) > 1))
+        
+        status_counts = {status: 0 for status in CLIENT_STATUSES}
+        last_statuses = {}
+        
+        for row in reversed(all_data[1:]):
+            if len(row) >= 6 and row[1] not in last_statuses:
+                last_statuses[row[1]] = row[5]
+        
+        for status in last_statuses.values():
+            if status in status_counts:
+                status_counts[status] += 1
+        
+        today = datetime.now().date()
+        week_ago = today - timedelta(days=7)
+        month_ago = today - timedelta(days=30)
+        
+        today_count = 0
+        week_count = 0
+        month_count = 0
+        
+        for row in all_data[1:]:
+            if len(row) >= 1 and row[0]:
+                try:
+                    msg_date = datetime.strptime(row[0].split()[0], "%Y-%m-%d").date()
+                    if msg_date == today:
+                        today_count += 1
+                    if msg_date >= week_ago:
+                        week_count += 1
+                    if msg_date >= month_ago:
+                        month_count += 1
+                except:
+                    continue
+        
+        text = "📊 **СТАТИСТИКА**\n\n"
+        text += f"👥 **Всего клиентов:** {total_clients}\n\n"
+        text += "**По статусам:**\n"
+        for status in CLIENT_STATUSES:
+            count = status_counts.get(status, 0)
+            text += f"{status}: {count}\n"
+        
+        text += f"\n📅 **Активность:**\n"
+        text += f"• За сегодня: {today_count} сообщ.\n"
+        text += f"• За неделю: {week_count} сообщ.\n"
+        text += f"• За месяц: {month_count} сообщ.\n"
+        
+        active_today = set()
+        for row in all_data[1:]:
+            if len(row) >= 2 and row[0]:
+                try:
+                    msg_date = datetime.strptime(row[0].split()[0], "%Y-%m-%d").date()
+                    if msg_date == today:
+                        active_today.add(row[1])
+                except:
+                    continue
+        
+        text += f"\n🔥 **Активных сегодня:** {len(active_today)} клиентов"
+        
+        await update.message.reply_text(text)
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка статистики: {e}")
+        await update.message.reply_text("❌ Ошибка при получении статистики")
+
+# === ЗАМЕТКИ ===
+async def note_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    
+    message = update.message
+    
+    if message.reply_to_message:
+        original_text = message.reply_to_message.text or ""
+        match = re.search(r'ID: `?(\d+)`?', original_text)
+        
+        if not match:
+            await message.reply_text("❌ Не могу найти ID клиента")
+            return
+        
+        client_id = int(match.group(1))
+        note_text = " ".join(context.args) if context.args else "Без текста"
+        
+        if add_note_to_client(client_id, note_text):
+            await message.reply_text(f"✅ Заметка добавлена к клиенту {client_id}")
+            
+            if client_id in user_topics:
+                topic_id = user_topics[client_id]
+                await context.bot.send_message(
+                    chat_id=GROUP_ID,
+                    message_thread_id=topic_id,
+                    text=f"📝 **Новая заметка:**\n{note_text}"
+                )
+        else:
+            await message.reply_text("❌ Ошибка при добавлении заметки")
+    
+    elif len(context.args) >= 2:
+        try:
+            client_id = int(context.args[0])
+            note_text = " ".join(context.args[1:])
+            
+            if add_note_to_client(client_id, note_text):
+                await message.reply_text(f"✅ Заметка добавлена к клиенту {client_id}")
+                
+                if client_id in user_topics:
+                    topic_id = user_topics[client_id]
+                    await context.bot.send_message(
+                        chat_id=GROUP_ID,
+                        message_thread_id=topic_id,
+                        text=f"📝 **Новая заметка:**\n{note_text}"
+                    )
+            else:
+                await message.reply_text("❌ Ошибка при добавлении заметки")
+        except ValueError:
+            await message.reply_text("❌ Неверный формат. Используй: /note ID текст")
+    else:
+        await message.reply_text(
+            "📝 **Как добавить заметку:**\n"
+            "1. Ответь на сообщение клиента: `/note текст`\n"
+            "2. Или напиши: `/note ID текст`"
+        )
+
+# === ПОИСК ===
+async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    
+    if not context.args:
+        await update.message.reply_text("🔍 Используй: /search текст")
+        return
+    
+    search_text = " ".join(context.args).lower()
+    
+    if not worksheet:
+        await update.message.reply_text("❌ Таблица не подключена")
+        return
+    
+    try:
+        all_data = worksheet.get_all_values()
+        if len(all_data) < 2:
+            await update.message.reply_text("📭 Нет данных")
+            return
+        
+        results = []
+        for row in all_data[1:]:
+            if len(row) >= 5 and search_text in row[4].lower():
+                timestamp = row[0] if len(row) > 0 else "?"
+                username = row[2] if len(row) > 2 else "?"
+                message = row[4][:100] + "..." if len(row[4]) > 100 else row[4]
+                
+                results.append(f"• {timestamp} | {username}: {message}")
+        
+        if not results:
+            await update.message.reply_text("🔍 Ничего не найдено")
+            return
+        
+        text = f"🔍 **Найдено {len(results)} совпадений:**\n\n"
+        
+        if len(results) > 20:
+            results = results[:20]
+            text += "(показаны первые 20)\n\n"
+        
+        for i, res in enumerate(results, 1):
+            text += f"{i}. {res}\n"
+        
+        if len(text) > 4000:
+            parts = [text[i:i+4000] for i in range(0, len(text), 4000)]
+            for part in parts:
+                await update.message.reply_text(part)
+        else:
+            await update.message.reply_text(text)
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка поиска: {e}")
+        await update.message.reply_text("❌ Ошибка при поиске")
+
+# === БЛОКИРОВКА ===
+async def ban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    
+    if not context.args:
+        await update.message.reply_text("❌ Используй: /ban ID [причина]")
+        return
+    
+    try:
+        user_id = int(context.args[0])
+        reason = " ".join(context.args[1:]) if len(context.args) > 1 else "Без причины"
+        
+        blacklist.add(user_id)
+        add_note_to_client(user_id, f"🚫 ЗАБЛОКИРОВАН. Причина: {reason}")
+        update_client_status(user_id, "5️⃣ Негатив/Отказ")
+        
+        if user_id in user_topics:
+            topic_id = user_topics[user_id]
+            await context.bot.send_message(
+                chat_id=GROUP_ID,
+                message_thread_id=topic_id,
+                text=f"🚫 **Клиент заблокирован**\nПричина: {reason}"
+            )
+        
+        await update.message.reply_text(f"✅ Клиент {user_id} заблокирован\nПричина: {reason}")
+        
+    except ValueError:
+        await update.message.reply_text("❌ Неверный ID")
+
+async def unban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    
+    if not context.args:
+        await update.message.reply_text("❌ Используй: /unban ID")
+        return
+    
+    try:
+        user_id = int(context.args[0])
+        
+        if user_id in blacklist:
+            blacklist.remove(user_id)
+            add_note_to_client(user_id, "✅ РАЗБЛОКИРОВАН")
+            
+            if user_id in user_topics:
+                topic_id = user_topics[user_id]
+                await context.bot.send_message(
+                    chat_id=GROUP_ID,
+                    message_thread_id=topic_id,
+                    text="✅ **Клиент разблокирован**"
+                )
+            
+            await update.message.reply_text(f"✅ Клиент {user_id} разблокирован")
+        else:
+            await update.message.reply_text(f"ℹ️ Клиент {user_id} не в черном списке")
+        
+    except ValueError:
+        await update.message.reply_text("❌ Неверный ID")
+
+async def blacklist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    
+    if not blacklist:
+        await update.message.reply_text("📭 Черный список пуст")
+        return
+    
+    text = "🚫 **ЧЕРНЫЙ СПИСОК**\n\n"
+    
+    for user_id in blacklist:
+        name = "Неизвестно"
+        if worksheet:
+            try:
+                all_data = worksheet.get_all_values()
+                for row in reversed(all_data[1:]):
+                    if len(row) > 3 and row[1] == str(user_id):
+                        name = row[3] if row[3] else row[2] if row[2] else "Неизвестно"
+                        break
+            except:
+                pass
+        
+        text += f"• `{user_id}` - {name}\n"
+    
+    await update.message.reply_text(text)
+
+# === ПРОВЕРКА НЕАКТИВНЫХ КЛИЕНТОВ ===
+async def check_inactive_clients(context: ContextTypes.DEFAULT_TYPE):
+    if not worksheet:
+        return
+    
+    try:
+        all_data = worksheet.get_all_values()
+        if len(all_data) < 2:
+            return
+        
+        client_data = {}
+        for row in all_data[1:]:
+            if len(row) >= 6 and row[1]:
+                user_id = row[1]
+                client_data[user_id] = {
+                    'status': row[5] if len(row) > 5 else "1️⃣ Новый",
+                    'date': row[0] if len(row) > 0 else None
+                }
+        
+        today = datetime.now().date()
+        changed_count = 0
+        
+        for user_id, data in client_data.items():
+            if data['status'] in ["4️⃣ Передан руководителю 👤", "5️⃣ Негатив/Отказ", "6️⃣ Нецелевой"]:
+                continue
+            
+            if data['date']:
+                try:
+                    last_date = datetime.strptime(data['date'].split()[0], "%Y-%m-%d").date()
+                    days_inactive = (today - last_date).days
+                    
+                    if days_inactive >= 3:
+                        if update_client_status(int(user_id), "6️⃣ Нецелевой"):
+                            changed_count += 1
+                except:
+                    continue
+        
+        if changed_count > 0:
+            logger.info(f"✅ Автостатус: обновлено {changed_count} клиентов")
+            
+    except Exception as e:
+        logger.error(f"❌ Ошибка проверки неактивных клиентов: {e}")
+
+# === ЕЖЕДНЕВНАЯ СТАТИСТИКА ===
+async def daily_stats(context: ContextTypes.DEFAULT_TYPE):
+    if not worksheet:
+        return
+    
+    try:
+        all_data = worksheet.get_all_values()
+        if len(all_data) < 2:
+            await context.bot.send_message(chat_id=ADMIN_ID, text="📭 Нет данных для статистики")
+            return
+        
+        yesterday = (datetime.now() - timedelta(days=1)).date()
+        
+        new_clients_yesterday = set()
+        messages_yesterday = 0
+        active_clients_yesterday = set()
+        
+        for row in all_data[1:]:
+            if len(row) >= 2 and row[0] and row[1]:
+                try:
+                    msg_date = datetime.strptime(row[0].split()[0], "%Y-%m-%d").date()
+                    if msg_date == yesterday:
+                        messages_yesterday += 1
+                        active_clients_yesterday.add(row[1])
+                        
+                        if is_first_message(int(row[1])):
+                            new_clients_yesterday.add(row[1])
+                except:
+                    continue
+        
+        last_statuses = {}
+        for row in reversed(all_data[1:]):
+            if len(row) >= 6 and row[1] and row[1] not in last_statuses:
+                last_statuses[row[1]] = row[5]
+        
+        status_counts = {status: 0 for status in CLIENT_STATUSES}
+        for status in last_statuses.values():
+            if status in status_counts:
+                status_counts[status] += 1
+        
+        text = "📊 **ЕЖЕДНЕВНАЯ СТАТИСТИКА**\n\n"
+        text += f"📅 За вчера ({yesterday.strftime('%d.%m.%Y')}):\n"
+        text += f"• Новых клиентов: {len(new_clients_yesterday)}\n"
+        text += f"• Всего сообщений: {messages_yesterday}\n"
+        text += f"• Активных клиентов: {len(active_clients_yesterday)}\n\n"
+        
+        text += "📊 **Текущие статусы:**\n"
+        for status in CLIENT_STATUSES:
+            count = status_counts.get(status, 0)
+            text += f"{status}: {count}\n"
+        
+        text += f"\n👥 **Всего клиентов:** {len(last_statuses)}"
+        
+        await context.bot.send_message(chat_id=ADMIN_ID, text=text)
+        logger.info("✅ Ежедневная статистика отправлена")
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка отправки статистики: {e}")
+
 # === ГЛАВНАЯ ===
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
@@ -923,11 +1354,12 @@ def main():
     app.add_handler(CommandHandler("check_sheets", check_sheets))
     app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("broadcast", broadcast_command))
-    
-    # Новые команды
     app.add_handler(CommandHandler("stats", stats_command))
     app.add_handler(CommandHandler("note", note_command))
     app.add_handler(CommandHandler("search", search_command))
+    app.add_handler(CommandHandler("ban", ban_command))
+    app.add_handler(CommandHandler("unban", unban_command))
+    app.add_handler(CommandHandler("blacklist", blacklist_command))
     
     # Обработчики кнопок
     app.add_handler(CallbackQueryHandler(button_callback, pattern="^status_"))
@@ -938,9 +1370,19 @@ def main():
     app.add_handler(MessageHandler(~filters.Chat(ADMIN_ID) & (filters.PHOTO | filters.VIDEO | filters.Document.ALL | filters.VOICE), handle_media))
     app.add_handler(MessageHandler(~filters.Chat(ADMIN_ID) & filters.TEXT & ~filters.COMMAND, handle_client_message))
     
+    # Планировщик задач
+    job_queue = app.job_queue
+    if job_queue:
+        job_queue.run_daily(daily_stats, time=datetime.strptime("09:00", "%H:%M").time())
+        job_queue.run_repeating(check_inactive_clients, interval=3600, first=10)
+        logger.info("⏰ Планировщик задач запущен")
+    
     app.run_polling()
 
 if __name__ == "__main__":
+    logger.info("🔄 Запуск health check сервера")
     health_thread = threading.Thread(target=run_health_server, daemon=True)
     health_thread.start()
+    
+    logger.info("🔄 Запуск main()")
     main()

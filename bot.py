@@ -135,6 +135,7 @@ def catch_errors(func):
     """Декоратор для отлова ошибок в асинхронных функциях"""
     async def wrapper(update, context, *args, **kwargs):
         try:
+            logger.info(f"🔄 Вызов функции {func.__name__}")
             return await func(update, context, *args, **kwargs)
         except Exception as e:
             error_title = f"Ошибка в {func.__name__}"
@@ -145,8 +146,14 @@ def catch_errors(func):
                 user = update.effective_user
                 user_info = f"{user.first_name} (@{user.username}) ID: {user.id}"
             
+            logger.error(f"❌ Ошибка в {func.__name__}: {error_details}")
             await send_error_notification(context, error_title, error_details, user_info)
-            raise e
+            
+            # Пробуем уведомить пользователя
+            try:
+                await update.message.reply_text("❌ Произошла внутренняя ошибка. Мы уже работаем над её исправлением.")
+            except:
+                pass
     return wrapper
 
 # === ИНИЦИАЛИЗАЦИЯ OPENROUTER ===
@@ -176,6 +183,8 @@ ai_client = init_ai_client()
 async def generate_client_summary(user_id, user_name):
     """Генерирует краткую выжимку о клиенте на основе истории диалога"""
     
+    logger.info(f"📝 Генерация выжимки для {user_id}")
+    
     if not ai_client:
         return "📝 Выжимка недоступна (AI не подключен)"
     
@@ -203,6 +212,7 @@ async def generate_client_summary(user_id, user_name):
     summary_prompt += "\nВыжимка:"
     
     try:
+        logger.info(f"📤 Отправка запроса к AI для выжимки")
         response = ai_client.chat.completions.create(
             model=AI_MODEL,
             messages=[{"role": "user", "content": summary_prompt}],
@@ -210,6 +220,7 @@ async def generate_client_summary(user_id, user_name):
             max_tokens=300
         )
         summary = response.choices[0].message.content.strip()
+        logger.info(f"✅ Выжимка получена")
         return f"📊 **Выжимка о клиенте:**\n{summary}"
     except Exception as e:
         logger.error(f"❌ Ошибка генерации выжимки: {e}")
@@ -219,7 +230,10 @@ async def generate_client_summary(user_id, user_name):
 async def generate_ai_response(user_id, user_message, user_name):
     """Генерирует ответ от ИИ для квалификации клиента"""
     
+    logger.info(f"🤖 Генерация AI ответа для {user_id}")
+    
     if not ai_client:
+        logger.warning("⚠️ AI клиент не инициализирован, возвращаем заглушку")
         return "Спасибо за обращение! С вами свяжется наш руководитель."
     
     history = user_conversation_history.get(user_id, [])
@@ -278,6 +292,7 @@ async def generate_ai_response(user_id, user_message, user_name):
     messages.append({"role": "user", "content": user_message})
     
     try:
+        logger.info(f"📤 Отправка запроса к AI для ответа")
         response = ai_client.chat.completions.create(
             model=AI_MODEL,
             messages=messages,
@@ -287,6 +302,7 @@ async def generate_ai_response(user_id, user_message, user_name):
         )
         
         ai_answer = response.choices[0].message.content.strip()
+        logger.info(f"✅ AI ответ получен: {ai_answer[:50]}...")
         
         user_conversation_history.setdefault(user_id, []).append(
             {"role": "user", "content": user_message}
@@ -709,6 +725,7 @@ async def get_or_create_topic(context, user_id, username, first_name):
 @catch_errors
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    logger.info(f"🚀 Команда /start от пользователя {user.id}")
     
     if user.id in blacklist:
         await update.message.reply_text("⛔ Вы заблокированы в этом боте.")
@@ -741,6 +758,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_client_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     
+    # ========== ДИАГНОСТИКА ==========
+    logger.info(f"🔥🔥🔥 ПОЛУЧЕНО СООБЩЕНИЕ от {user.id}")
+    logger.info(f"Текст: {update.message.text}")
+    logger.info(f"Username: {user.username}")
+    logger.info(f"First name: {user.first_name}")
+    # ==================================
+    
     if user.id in blacklist:
         await update.message.reply_text("⛔ Вы заблокированы в этом боте.")
         return
@@ -750,27 +774,47 @@ async def handle_client_message(update: Update, context: ContextTypes.DEFAULT_TY
     
     save_message(user_id, user.username or "нет", user.first_name or "нет", message.text)
     
+    # ========== ДИАГНОСТИКА ТЕМЫ ==========
+    logger.info(f"📋 Проверяем тему для user {user_id}")
+    # =======================================
+    
     topic_id = await get_or_create_topic(context, user_id, user.username, user.first_name)
     if not topic_id:
+        logger.error(f"❌ НЕ УДАЛОСЬ СОЗДАТЬ ТЕМУ для {user_id}")
         await message.reply_text("❌ Ошибка")
         return
     
-    current_status = get_client_status(user_id)
+    logger.info(f"✅ Тема создана/найдена: {topic_id}")
     
-    if current_status in ["Передан руководителю 👤", "Негатив/Отказ", "Нецелевой"]:
-        await message.reply_text("Спасибо за обращение! С вами уже связались или ваш запрос обработан.")
-        return
+    current_status = get_client_status(user_id)
+    logger.info(f"📊 Текущий статус клиента: {current_status}")
+    
+    # Временно отключаем проверку статуса для теста
+    # if current_status in ["Передан руководителю 👤", "Негатив/Отказ", "Нецелевой"]:
+    #     await message.reply_text("Спасибо за обращение! С вами уже связались или ваш запрос обработан.")
+    #     return
+    
+    # ========== ДИАГНОСТИКА AI ==========
+    logger.info(f"🤖 Генерируем AI ответ для {user_id}")
+    # =====================================
     
     ai_response = await generate_ai_response(user_id, message.text, user.first_name)
+    
+    logger.info(f"✅ AI ответ получен: {ai_response[:100]}...")
     
     transfer_keywords = ["передаю руководителю", "свяжется руководитель", "передам твой запрос", "контакты руководителей"]
     should_transfer = any(keyword in ai_response.lower() for keyword in transfer_keywords)
     
+    logger.info(f"🔄 Должен ли передать руководителю: {should_transfer}")
+    
     summary = ""
     if should_transfer or len(user_conversation_history.get(user_id, [])) > 10:
+        logger.info(f"📝 Генерируем выжимку для {user_id}")
         summary = await generate_client_summary(user_id, user.first_name)
+        logger.info(f"✅ Выжимка готова")
     
     if should_transfer:
+        logger.info(f"📞 Передаём клиента {user_id} руководителю")
         update_client_status(user_id, "Готов к передаче")
         current_status = "Готов к передаче"
         
@@ -787,7 +831,13 @@ async def handle_client_message(update: Update, context: ContextTypes.DEFAULT_TY
             text=f"🤖 **Клиент готов к передаче!**\nКонтакты руководителей: {', '.join(MANAGER_CONTACTS)}"
         )
     
+    # ========== ДИАГНОСТИКА ОТПРАВКИ ==========
+    logger.info(f"📤 Отправляем ответ клиенту {user_id}")
+    # ===========================================
+    
     await message.reply_text(ai_response)
+    
+    logger.info(f"✅ Ответ отправлен")
     
     log_to_sheets(user_id, user.username, user.first_name, message.text, status=current_status, summary=summary)
     
@@ -800,6 +850,8 @@ async def handle_client_message(update: Update, context: ContextTypes.DEFAULT_TY
         message_thread_id=topic_id, 
         text=f"👤 **Клиент:**\n{message.text}\n\n🤖 **Ответ ИИ:**\n{ai_response}\n\n**Статус:** {current_status}{note_text}{summary_text}"
     )
+    
+    logger.info(f"🏁 Обработка сообщения от {user_id} завершена")
 
 # === КОМАНДА СТАТУС ===
 @catch_errors

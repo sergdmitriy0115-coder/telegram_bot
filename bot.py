@@ -24,7 +24,11 @@ ERROR_LOG_CHAT = 7675037573  # ТВОЙ ID (числом, не строкой!)
 
 # --- НАСТРОЙКИ VseGPT (РОССИЙСКИЙ AI) ---
 VSEGPT_API_KEY = os.environ.get('VSEGPT_API_KEY')
-AI_MODEL = "google/gemini-2.0-flash-exp"  # Бесплатная модель Gemini
+AI_MODEL = "gemini-2.0-flash"
+# или
+AI_MODEL = "gemini-pro"
+# или
+AI_MODEL = "google/gemini-pro"  # Бесплатная модель Gemini
 
 # --- НАСТРОЙКИ GOOGLE SHEETS (ТВОЯ ТАБЛИЦА) ---
 SPREADSHEET_ID = "15vlEZ0Q6OmQh51DsA9B_fgiLwed12ekroz1aeWsgXVI"

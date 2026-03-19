@@ -24,7 +24,7 @@ ERROR_LOG_CHAT = "1121954610"  # КУДА ОТПРАВЛЯТЬ ОШИБКИ
 
 # --- НАСТРОЙКИ OPENROUTER / DEEPSEEK ---
 OPENROUTER_API_KEY = os.environ.get('OPENROUTER_API_KEY')
-AI_MODEL = "deepseek/deepseek-r1:free"  # Бесплатная модель
+AI_MODEL = "google/gemini-2.0-flash-exp:free"  # Бесплатная модель
 
 # --- НАСТРОЙКИ GOOGLE SHEETS (ТВОЯ ТАБЛИЦА) ---
 SPREADSHEET_ID = "15vlEZ0Q6OmQh51DsA9B_fgiLwed12ekroz1aeWsgXVI"

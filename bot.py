@@ -1,5 +1,7 @@
 import os
 import logging
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -11,6 +13,22 @@ LOG_FILE = "logs.txt"
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# === ВЕБ-СЕРВЕР ДЛЯ RENDER ===
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+    def log_message(self, format, *args): pass
+
+def run_health_server():
+    try:
+        server = HTTPServer(('0.0.0.0', 10000), HealthCheckHandler)
+        logger.info("✅ Health check server started")
+        server.serve_forever()
+    except Exception as e:
+        logger.error(f"Health server error: {e}")
 
 def save_message(user_id, username, first_name, text):
     try:
@@ -42,7 +60,7 @@ async def check_sheets(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ Тестовый бот работает!")
 
 def main():
-    logger.info("🚀 Запуск ТЕСТОВОГО бота...")
+    logger.info("🚀 Запуск ТЕСТОВОГО бота с веб-сервером...")
     
     app = Application.builder().token(BOT_TOKEN).build()
     
@@ -56,4 +74,9 @@ def main():
     app.run_polling()
 
 if __name__ == "__main__":
+    # Запускаем health check сервер в отдельном потоке
+    health_thread = threading.Thread(target=run_health_server, daemon=True)
+    health_thread.start()
+    
+    logger.info("🔄 Запуск main()")
     main()

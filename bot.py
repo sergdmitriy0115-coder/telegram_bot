@@ -20,11 +20,11 @@ GROUP_ID = -1003743707530  # ID ТВОЕЙ ГРУППЫ С ТЕМАМИ
 LOG_FILE = "logs.txt"
 
 # --- НАСТРОЙКИ ДЛЯ ОТПРАВКИ ОШИБОК ---
-ERROR_LOG_CHAT = "1121954610"  # КУДА ОТПРАВЛЯТЬ ОШИБКИ
+ERROR_LOG_CHAT = 7675037573  # ТВОЙ ID (числом, не строкой!)
 
-# --- НАСТРОЙКИ OPENROUTER / DEEPSEEK ---
-OPENROUTER_API_KEY = os.environ.get('OPENROUTER_API_KEY')
-AI_MODEL = "google/gemini-2.0-flash-exp:free"  # Бесплатная модель
+# --- НАСТРОЙКИ VseGPT (РОССИЙСКИЙ AI) ---
+VSEGPT_API_KEY = os.environ.get('VSEGPT_API_KEY')
+AI_MODEL = "google/gemini-2.0-flash-exp"  # Бесплатная модель Gemini
 
 # --- НАСТРОЙКИ GOOGLE SHEETS (ТВОЯ ТАБЛИЦА) ---
 SPREADSHEET_ID = "15vlEZ0Q6OmQh51DsA9B_fgiLwed12ekroz1aeWsgXVI"
@@ -156,22 +156,20 @@ def catch_errors(func):
                 pass
     return wrapper
 
-# === ИНИЦИАЛИЗАЦИЯ OPENROUTER ===
+# === ИНИЦИАЛИЗАЦИЯ VseGPT ===
 def init_ai_client():
-    if not OPENROUTER_API_KEY:
-        logger.warning("⚠️ OPENROUTER_API_KEY не задан, ИИ-функции будут отключены")
+    """Инициализирует клиент для VseGPT (российский аналог OpenRouter)"""
+    if not VSEGPT_API_KEY:
+        logger.warning("⚠️ VSEGPT_API_KEY не задан, ИИ-функции будут отключены")
         return None
     
     try:
         client = OpenAI(
-            base_url="https://openrouter.ai/api/v1",
-            api_key=OPENROUTER_API_KEY,
-            default_headers={
-                "HTTP-Referer": "https://github.com/your-bot",
-                "X-Title": "ADD Production Qualification Bot",
-            }
+            base_url="https://api.vsegpt.ru/v1",  # Адрес VseGPT
+            api_key=VSEGPT_API_KEY,
+            default_headers={}
         )
-        logger.info(f"✅ AI клиент инициализирован, модель: {AI_MODEL}")
+        logger.info(f"✅ AI клиент (VseGPT) инициализирован, модель: {AI_MODEL}")
         return client
     except Exception as e:
         logger.error(f"❌ Ошибка инициализации AI: {e}")
@@ -293,6 +291,9 @@ async def generate_ai_response(user_id, user_message, user_name):
     
     try:
         logger.info(f"📤 Отправка запроса к AI для ответа")
+        logger.info(f"📝 Модель: {AI_MODEL}")
+        logger.info(f"📝 Сообщение: {user_message[:100]}...")
+        
         response = ai_client.chat.completions.create(
             model=AI_MODEL,
             messages=messages,
@@ -301,8 +302,9 @@ async def generate_ai_response(user_id, user_message, user_name):
             top_p=0.9
         )
         
+        logger.info(f"✅ Ответ получен от API")
         ai_answer = response.choices[0].message.content.strip()
-        logger.info(f"✅ AI ответ получен: {ai_answer[:50]}...")
+        logger.info(f"✅ AI ответ получен: {ai_answer[:100]}...")
         
         user_conversation_history.setdefault(user_id, []).append(
             {"role": "user", "content": user_message}
@@ -314,7 +316,7 @@ async def generate_ai_response(user_id, user_message, user_name):
         return ai_answer
         
     except Exception as e:
-        logger.error(f"❌ Ошибка генерации AI ответа: {e}")
+        logger.error(f"❌ Ошибка генерации AI ответа: {e}", exc_info=True)
         return "Извини, техническая заминка. Я передам твой запрос руководителю, он свяжется с тобой."
 
 # === ФОРМАТИРОВАНИЕ ТАБЛИЦЫ ===
@@ -795,12 +797,12 @@ async def handle_client_message(update: Update, context: ContextTypes.DEFAULT_TY
     #     return
     
     # ========== ДИАГНОСТИКА AI ==========
-    logger.info(f"🤖 Генерируем AI ответ для {user_id}")
+    logger.info(f"🤖 Вызываем generate_ai_response для {user_id}")
     # =====================================
     
     ai_response = await generate_ai_response(user_id, message.text, user.first_name)
     
-    logger.info(f"✅ AI ответ получен: {ai_response[:100]}...")
+    logger.info(f"✅ generate_ai_response вернул ответ: {ai_response[:100] if ai_response else 'None'}...")
     
     transfer_keywords = ["передаю руководителю", "свяжется руководитель", "передам твой запрос", "контакты руководителей"]
     should_transfer = any(keyword in ai_response.lower() for keyword in transfer_keywords)
@@ -1035,7 +1037,7 @@ async def check_sheets(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if worksheet:
         users_count = len(get_all_users_from_sheets())
         blacklist_count = len(blacklist)
-        ai_status = "✅ Работает" if ai_client else "❌ Не подключен (проверь OPENROUTER_API_KEY)"
+        ai_status = "✅ Работает" if ai_client else "❌ Не подключен (проверь VSEGPT_API_KEY)"
         
         await update.message.reply_text(
             f"✅ **Google Sheets подключен**\n"

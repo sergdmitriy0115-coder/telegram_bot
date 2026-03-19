@@ -59,7 +59,7 @@ def run_health_server():
     except Exception as e:
         logger.error(f"Health server error: {e}")
 
-# === ФОРМАТИРОВАНИЕ ТАБЛИЦЫ ===
+# === ФОРМАТИРОВАНИЕ ТАБЛИЦЫ (ИСПРАВЛЕННОЕ) ===
 def format_worksheet(worksheet):
     """Делает таблицу красивой: заголовки, границы, выравнивание"""
     try:
@@ -68,7 +68,7 @@ def format_worksheet(worksheet):
         
         # Настраиваем форматирование через batch_update
         requests = [
-            # 1. Жирный шрифт для заголовков
+            # 1. Жирный шрифт и заливка для заголовков
             {
                 "repeatCell": {
                     "range": {
@@ -80,16 +80,10 @@ def format_worksheet(worksheet):
                         "userEnteredFormat": {
                             "textFormat": {"bold": True},
                             "backgroundColor": {"red": 0.9, "green": 0.9, "blue": 0.9},
-                            "horizontalAlignment": "CENTER",
-                            "borders": {
-                                "bottom": {
-                                    "style": "SOLID",
-                                    "color": {"red": 0, "green": 0, "blue": 0}
-                                }
-                            }
+                            "horizontalAlignment": "CENTER"
                         }
                     },
-                    "fields": "userEnteredFormat(textFormat,bold),userEnteredFormat(backgroundColor),userEnteredFormat(horizontalAlignment),userEnteredFormat(borders)"
+                    "fields": "userEnteredFormat(textFormat,backgroundColor,horizontalAlignment)"
                 }
             },
             # 2. Авто-ширина для всех колонок

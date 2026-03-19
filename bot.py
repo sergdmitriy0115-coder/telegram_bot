@@ -9,10 +9,10 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
-# --- НАСТРОЙКИ ---
+# --- НАСТРОЙКИ (ТВОИ ДАННЫЕ) ---
 BOT_TOKEN = os.environ.get('TELEGRAM_TOKEN')
-ADMIN_ID = 1121954610  # ТВОЙ ID
-GROUP_ID = -1003701333730  # ID ТВОЕЙ ГРУППЫ С ТЕМАМИ
+ADMIN_ID = 7675037573  # ТВОЙ ID (обновлён)
+GROUP_ID = -1003743707530  # ID ТВОЕЙ ГРУППЫ С ТЕМАМИ (обновлён)
 LOG_FILE = "logs.txt"
 
 # --- НАСТРОЙКИ GOOGLE SHEETS ---
@@ -46,7 +46,7 @@ def run_health_server():
     except Exception as e:
         logger.error(f"Health server error: {e}")
 
-# === ИНИЦИАЛИЗАЦИЯ GOOGLE SHEETS С ПОДРОБНЫМ ЛОГИРОВАНИЕМ ===
+# === ИНИЦИАЛИЗАЦИЯ GOOGLE SHEETS ===
 def init_google_sheets():
     """Подключается к Google Sheets и возвращает объект листа"""
     logger.info("🔄 Начинаем подключение к Google Sheets...")
@@ -56,7 +56,6 @@ def init_google_sheets():
         creds_json = os.environ.get('GOOGLE_CREDS_JSON')
         if not creds_json:
             logger.error("❌ GOOGLE_CREDS_JSON не найден в переменных окружения")
-            logger.error("👉 Добавь переменную GOOGLE_CREDS_JSON на Render с полным JSON-ключом")
             return None
         
         logger.info("✅ GOOGLE_CREDS_JSON найден, пробуем распарсить JSON...")
@@ -67,7 +66,6 @@ def init_google_sheets():
             logger.info(f"✅ JSON распаршен успешно. client_email: {creds_dict.get('client_email', 'не найден')}")
         except json.JSONDecodeError as e:
             logger.error(f"❌ Ошибка парсинга JSON: {e}")
-            logger.error("👉 Проверь, что GOOGLE_CREDS_JSON содержит валидный JSON")
             return None
         
         # Настраиваем scope
@@ -97,16 +95,9 @@ def init_google_sheets():
             logger.info(f"✅ Таблица открыта успешно. Название: {spreadsheet.title}")
         except gspread.exceptions.SpreadsheetNotFound:
             logger.error(f"❌ Таблица с ID {SPREADSHEET_ID} не найдена")
-            logger.error("👉 Проверь правильность SPREADSHEET_ID и дай доступ сервисному аккаунту к таблице")
             return None
         except gspread.exceptions.APIError as e:
             logger.error(f"❌ Ошибка API при открытии таблицы: {e}")
-            if hasattr(e, 'response'):
-                try:
-                    error_json = e.response.json()
-                    logger.error(f"Детали ошибки: {error_json}")
-                except:
-                    pass
             return None
         
         # Работаем с листом
@@ -165,35 +156,79 @@ def save_message(user_id, username, first_name, text, is_from_admin=False):
 
 # === СОЗДАНИЕ ТЕМЫ ===
 async def get_or_create_topic(context, user_id, username, first_name):
-    if user_id in user_topics:
-        return user_topics[user_id]
+    logger.info(f"🔄 get_or_create_topic вызван для user {user_id}")
     
+    # Проверяем, есть ли уже тема
+    if user_id in user_topics:
+        topic_id = user_topics[user_id]
+        logger.info(f"✅ Найдена существующая тема {topic_id} для user {user_id}")
+        return topic_id
+    
+    # Проверяем GROUP_ID
+    logger.info(f"🔍 GROUP_ID = {GROUP_ID}, тип: {type(GROUP_ID)}")
+    
+    # Создаём название темы
     topic_name = f"{first_name} (@{username if username else 'no_username'})"
+    logger.info(f"📝 Пробуем создать тему с названием: '{topic_name[:128]}'")
+    
     try:
+        # Пытаемся создать тему
+        logger.info(f"🔄 Вызываем create_forum_topic с chat_id={GROUP_ID}")
         result = await context.bot.create_forum_topic(chat_id=GROUP_ID, name=topic_name[:128])
+        
+        # Проверяем результат
+        logger.info(f"📦 Результат create_forum_topic: {result}")
+        
         topic_id = result.message_thread_id
+        logger.info(f"✅ Получен topic_id: {topic_id}")
+        
+        # Сохраняем в хранилище
         user_topics[user_id] = topic_id
+        logger.info(f"💾 Сохранено в user_topics: user {user_id} -> topic {topic_id}")
+        
+        # Отправляем приветственное сообщение в тему
+        logger.info(f"🔄 Отправляем приветствие в тему {topic_id}")
         await context.bot.send_message(
             chat_id=GROUP_ID, message_thread_id=topic_id,
             text=f"🆕 **Новый клиент!**\nИмя: {first_name}\nUsername: @{username if username else 'нет'}\nID: `{user_id}`"
         )
-        logger.info(f"✅ Создана тема {topic_id} для пользователя {user_id}")
+        logger.info(f"✅ Приветствие отправлено в тему")
+        
+        logger.info(f"✅ Тема {topic_id} успешно создана и настроена для пользователя {user_id}")
         return topic_id
+        
     except Exception as e:
-        logger.error(f"❌ Ошибка создания темы для {user_id}: {e}")
+        # Подробно логируем ошибку
+        logger.error(f"❌ ОШИБКА создания темы для user {user_id}: {type(e).__name__}: {e}")
+        
+        # Дополнительная информация об ошибке
+        import traceback
+        logger.error(f"📋 Traceback: {traceback.format_exc()}")
+        
+        # Проверяем, может быть проблема с правами
+        if "Forbidden" in str(e):
+            logger.error("🔴 Бот не имеет прав на создание тем. Проверь, что бот администратор группы и у него есть право 'Управлять темами'")
+        elif "chat not found" in str(e).lower():
+            logger.error(f"🔴 Группа с ID {GROUP_ID} не найдена. Проверь правильность GROUP_ID и что бот добавлен в группу")
+        
         return None
 
 # === /START ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    logger.info(f"Команда /start от пользователя {user.id} (@{user.username})")
+    logger.info(f"🚀 Команда /start от пользователя {user.id} (@{user.username})")
     
     save_message(user.id, user.username or "нет", user.first_name or "нет", "/start")
     
+    logger.info(f"🔄 Вызов get_or_create_topic для user {user.id}")
     topic_id = await get_or_create_topic(context, user.id, user.username, user.first_name)
+    
     if not topic_id:
+        logger.error(f"❌ Не удалось создать/получить тему для user {user.id}")
         await update.message.reply_text("❌ Ошибка. Попробуйте позже.")
         return
+    
+    logger.info(f"✅ Тема {topic_id} получена, продолжаем обработку /start")
     
     log_to_sheets(user.id, user.username, user.first_name, "/start", stage=1, topic_id=topic_id)
     user_stage[user.id] = 1
@@ -201,7 +236,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"Здравствуйте, {user.first_name}! 👋\n\nПодскажите, по какому вопросу хотели бы к нам обратиться?"
     )
+    
+    logger.info(f"📤 Отправляем уведомление в тему {topic_id}")
     await context.bot.send_message(chat_id=GROUP_ID, message_thread_id=topic_id, text="👤 Клиент начал диалог.")
+    logger.info(f"✅ /start для user {user.id} завершен успешно")
 
 # === СООБЩЕНИЯ КЛИЕНТОВ ===
 async def handle_client_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -209,7 +247,7 @@ async def handle_client_message(update: Update, context: ContextTypes.DEFAULT_TY
     message = update.message
     user_id = user.id
     
-    logger.info(f"Сообщение от клиента {user_id}: {message.text[:50]}...")
+    logger.info(f"💬 Сообщение от клиента {user_id}: {message.text[:50]}...")
     
     save_message(user_id, user.username or "нет", user.first_name or "нет", message.text)
     
@@ -246,6 +284,7 @@ async def handle_admin_reply_in_topic(update: Update, context: ContextTypes.DEFA
     
     message = update.effective_message
     topic_id = message.message_thread_id
+    
     client_id = next((uid for uid, tid in user_topics.items() if tid == topic_id), None)
     
     if not client_id:
@@ -261,7 +300,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     message = update.message
     
-    logger.info(f"Медиа от клиента {user.id}")
+    logger.info(f"📎 Медиа от клиента {user.id}")
     
     topic_id = await get_or_create_topic(context, user.id, user.username, user.first_name)
     if not topic_id:
@@ -297,7 +336,7 @@ async def admin_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # === ПРОВЕРКА SHEETS ===
 async def check_sheets(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    logger.info(f"Команда /check_sheets от пользователя {user_id}")
+    logger.info(f"📊 Команда /check_sheets от пользователя {user_id}")
     
     if user_id != ADMIN_ID:
         logger.warning(f"Пользователь {user_id} не админ, доступ запрещен")

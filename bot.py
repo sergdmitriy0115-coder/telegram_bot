@@ -9,15 +9,15 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
-# --- НАСТРОЙКИ (УЖЕ С ТВОИМИ ДАННЫМИ) ---
+# --- НАСТРОЙКИ ---
 BOT_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 ADMIN_ID = 1121954610  # ТВОЙ ID
 GROUP_ID = -1003701333730  # ID ТВОЕЙ ГРУППЫ С ТЕМАМИ
 LOG_FILE = "logs.txt"
 
-# --- НАСТРОЙКИ GOOGLE SHEETS (УЖЕ ВСТАВЛЕНЫ!) ---
-# ID твоей таблицы из ссылки: https://docs.google.com/spreadsheets/d/1gXNDETCzIhF-NFJ0iKHfJ6W1fglQ8J1iTCNyRWroXKg/
-SPREADSHEET_ID = "1gXNDETCzIhF-NFJ0iKHfJ6W1fglQ8J1iTCNyRWroXKg"
+# --- НАСТРОЙКИ GOOGLE SHEETS (ID НОВОЙ ТАБЛИЦЫ УЖЕ ВСТАВЛЕН!) ---
+# ID твоей новой таблицы из ссылки: https://docs.google.com/spreadsheets/d/15vlEZ0Q6OmQh51DsA9B_fgiLwed12ekroz1aeWsgXVI/
+SPREADSHEET_ID = "15vlEZ0Q6OmQh51DsA9B_fgiLwed12ekroz1aeWsgXVI"
 WORKSHEET_NAME = "Логи клиентов"  # Название листа в таблице
 
 # Хранилища

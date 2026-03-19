@@ -20,7 +20,7 @@ GROUP_ID = -1003743707530  # ID ТВОЕЙ ГРУППЫ С ТЕМАМИ
 LOG_FILE = "logs.txt"
 
 # --- НАСТРОЙКИ ДЛЯ ОТПРАВКИ ОШИБОК ---
-ERROR_LOG_CHAT = "@serg_dmitriy"  # КУДА ОТПРАВЛЯТЬ ОШИБКИ
+ERROR_LOG_CHAT = "1121954610"  # КУДА ОТПРАВЛЯТЬ ОШИБКИ
 
 # --- НАСТРОЙКИ OPENROUTER / DEEPSEEK ---
 OPENROUTER_API_KEY = os.environ.get('OPENROUTER_API_KEY')

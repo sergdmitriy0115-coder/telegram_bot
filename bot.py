@@ -4,8 +4,7 @@ import logging
 import threading
 import re
 import asyncio
-import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
@@ -34,7 +33,6 @@ CLIENT_STATUSES = [
 
 # Хранилища
 user_topics = {}
-user_stage = {}
 
 # --- Логирование ---
 logging.basicConfig(
@@ -59,16 +57,33 @@ def run_health_server():
     except Exception as e:
         logger.error(f"Health server error: {e}")
 
-# === ФОРМАТИРОВАНИЕ ТАБЛИЦЫ (ИСПРАВЛЕННОЕ) ===
+# === ФОРМАТИРОВАНИЕ ТАБЛИЦЫ ===
 def format_worksheet(worksheet):
-    """Делает таблицу красивой: заголовки, границы, выравнивание"""
+    """Делает таблицу красивой: Arial 11, жирные границы, авторасширение"""
     try:
-        # Получаем ID листа
         sheet_id = worksheet.id
         
-        # Настраиваем форматирование через batch_update
         requests = [
-            # 1. Жирный шрифт и заливка для заголовков
+            # Шрифт Arial 11 для всей таблицы
+            {
+                "repeatCell": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startRowIndex": 0,
+                        "endRowIndex": worksheet.row_count
+                    },
+                    "cell": {
+                        "userEnteredFormat": {
+                            "textFormat": {
+                                "fontFamily": "Arial",
+                                "fontSize": 11
+                            }
+                        }
+                    },
+                    "fields": "userEnteredFormat.textFormat(fontFamily,fontSize)"
+                }
+            },
+            # Жирный шрифт и заливка для заголовков
             {
                 "repeatCell": {
                     "range": {
@@ -78,7 +93,11 @@ def format_worksheet(worksheet):
                     },
                     "cell": {
                         "userEnteredFormat": {
-                            "textFormat": {"bold": True},
+                            "textFormat": {
+                                "bold": True,
+                                "fontFamily": "Arial",
+                                "fontSize": 11
+                            },
                             "backgroundColor": {"red": 0.9, "green": 0.9, "blue": 0.9},
                             "horizontalAlignment": "CENTER"
                         }
@@ -86,18 +105,18 @@ def format_worksheet(worksheet):
                     "fields": "userEnteredFormat(textFormat,backgroundColor,horizontalAlignment)"
                 }
             },
-            # 2. Авто-ширина для всех колонок
+            # Авто-ширина для всех колонок
             {
                 "autoResizeDimensions": {
                     "dimensions": {
                         "sheetId": sheet_id,
                         "dimension": "COLUMNS",
                         "startIndex": 0,
-                        "endIndex": 8
+                        "endIndex": 7  # 7 колонок (добавили Заметки)
                     }
                 }
             },
-            # 3. Границы для всех ячеек с данными
+            # Жирные границы
             {
                 "updateBorders": {
                     "range": {
@@ -105,38 +124,36 @@ def format_worksheet(worksheet):
                         "startRowIndex": 0,
                         "endRowIndex": worksheet.row_count,
                         "startColumnIndex": 0,
-                        "endColumnIndex": 8
+                        "endColumnIndex": 7
                     },
-                    "top": {"style": "SOLID", "color": {"red": 0.8, "green": 0.8, "blue": 0.8}},
-                    "bottom": {"style": "SOLID", "color": {"red": 0.8, "green": 0.8, "blue": 0.8}},
-                    "left": {"style": "SOLID", "color": {"red": 0.8, "green": 0.8, "blue": 0.8}},
-                    "right": {"style": "SOLID", "color": {"red": 0.8, "green": 0.8, "blue": 0.8}},
-                    "innerHorizontal": {"style": "SOLID", "color": {"red": 0.8, "green": 0.8, "blue": 0.8}},
-                    "innerVertical": {"style": "SOLID", "color": {"red": 0.8, "green": 0.8, "blue": 0.8}}
+                    "top": {"style": "SOLID_MEDIUM", "color": {"red": 0, "green": 0, "blue": 0}},
+                    "bottom": {"style": "SOLID_MEDIUM", "color": {"red": 0, "green": 0, "blue": 0}},
+                    "left": {"style": "SOLID_MEDIUM", "color": {"red": 0, "green": 0, "blue": 0}},
+                    "right": {"style": "SOLID_MEDIUM", "color": {"red": 0, "green": 0, "blue": 0}},
+                    "innerHorizontal": {"style": "SOLID_MEDIUM", "color": {"red": 0, "green": 0, "blue": 0}},
+                    "innerVertical": {"style": "SOLID_MEDIUM", "color": {"red": 0, "green": 0, "blue": 0}}
                 }
             },
-            # 4. Фиксация заголовков (первая строка всегда видна)
+            # Фиксация заголовков
             {
                 "updateSheetProperties": {
                     "properties": {
                         "sheetId": sheet_id,
-                        "gridProperties": {
-                            "frozenRowCount": 1
-                        }
+                        "gridProperties": {"frozenRowCount": 1}
                     },
                     "fields": "gridProperties.frozenRowCount"
                 }
             }
         ]
         
-        # Добавляем условное форматирование для статусов
+        # Цветные плашки для статусов
         status_colors = [
-            {"red": 0.9, "green": 0.9, "blue": 1.0},  # 1️⃣ Новый - голубой
-            {"red": 1.0, "green": 1.0, "blue": 0.8},  # 2️⃣ Думает - желтый
-            {"red": 0.8, "green": 1.0, "blue": 0.8},  # 3️⃣ В работе - зеленый
-            {"red": 0.8, "green": 0.8, "blue": 0.8},  # 4️⃣ Завершён - серый
-            {"red": 1.0, "green": 0.8, "blue": 0.8},  # 5️⃣ Отказ - красный
-            {"red": 0.7, "green": 0.7, "blue": 0.7}   # 6️⃣ Удалил - темно-серый
+            {"red": 0.8, "green": 0.9, "blue": 1.0},   # 1️⃣ Новый
+            {"red": 1.0, "green": 1.0, "blue": 0.7},   # 2️⃣ Думает
+            {"red": 0.7, "green": 1.0, "blue": 0.7},   # 3️⃣ В работе
+            {"red": 0.9, "green": 0.9, "blue": 0.9},   # 4️⃣ Завершён
+            {"red": 1.0, "green": 0.7, "blue": 0.7},   # 5️⃣ Отказ
+            {"red": 0.6, "green": 0.6, "blue": 0.6}    # 6️⃣ Удалил
         ]
         
         for i, status in enumerate(CLIENT_STATUSES):
@@ -146,8 +163,8 @@ def format_worksheet(worksheet):
                         "ranges": [{
                             "sheetId": sheet_id,
                             "startRowIndex": 1,
-                            "startColumnIndex": 7,
-                            "endColumnIndex": 8
+                            "startColumnIndex": 5,  # колонка F (Status)
+                            "endColumnIndex": 6
                         }],
                         "booleanRule": {
                             "condition": {
@@ -163,33 +180,26 @@ def format_worksheet(worksheet):
                 }
             })
         
-        # Применяем все изменения
         worksheet.spreadsheet.batch_update({"requests": requests})
-        logger.info("✅ Таблица отформатирована: заголовки, границы, цвета статусов")
+        logger.info("✅ Таблица отформатирована")
         
     except Exception as e:
-        logger.error(f"❌ Ошибка форматирования таблицы: {e}")
+        logger.error(f"❌ Ошибка форматирования: {e}")
 
 # === ПРОВЕРКА НА ДУБЛИКАТЫ ===
 def is_first_message(user_id):
-    """Проверяет, есть ли уже запись для этого пользователя"""
     if not worksheet:
         return True
-    
     try:
-        # Получаем все User ID из колонки B (индекс 1)
         user_ids = worksheet.col_values(2)[1:]
         return str(user_id) not in user_ids
-        
     except Exception as e:
         logger.error(f"❌ Ошибка проверки дубликатов: {e}")
         return True
 
-# === ОБНОВЛЕНИЕ СТАТУСА БЕЗ НОВОЙ СТРОКИ ===
+# === ОБНОВЛЕНИЕ СТАТУСА ===
 def update_client_status(user_id, new_status):
-    """Обновляет статус клиента (без создания новой строки)"""
     if not worksheet:
-        logger.warning("⚠️ Невозможно обновить статус: worksheet не инициализирован")
         return False
     
     try:
@@ -197,7 +207,6 @@ def update_client_status(user_id, new_status):
         if len(all_data) < 2:
             return False
         
-        # Ищем последнюю строку с этим user_id (с конца)
         last_row_index = None
         for i in range(len(all_data)-1, 0, -1):
             if len(all_data[i]) > 1 and all_data[i][1] == str(user_id):
@@ -205,44 +214,86 @@ def update_client_status(user_id, new_status):
                 break
         
         if last_row_index:
-            worksheet.update_cell(last_row_index, 8, new_status)
-            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            worksheet.update_cell(last_row_index, 1, current_time)
-            
-            logger.info(f"✅ Статус для user {user_id} обновлён на {new_status} (без дубликата)")
+            worksheet.update_cell(last_row_index, 6, new_status)  # колонка F
+            logger.info(f"✅ Статус для user {user_id} обновлён на {new_status}")
             return True
-        else:
-            logger.warning(f"⚠️ Не найдена запись для user {user_id}")
-            return False
-            
+        return False
     except Exception as e:
         logger.error(f"❌ Ошибка обновления статуса: {e}")
         return False
 
-# === ЗАПИСЬ В ТАБЛИЦУ (БЕЗ ДУБЛЕЙ) ===
-def log_to_sheets(user_id, username, first_name, message_text, stage=0, topic_id=None, status="1️⃣ Новый"):
-    """Записывает данные в таблицу, но только первое сообщение создаёт новую строку"""
+# === ДОБАВЛЕНИЕ ЗАМЕТКИ ===
+def add_note_to_client(user_id, note):
+    """Добавляет заметку к клиенту в колонку G"""
     if not worksheet:
-        logger.warning(f"⚠️ Пропускаем запись в таблицу для user {user_id}: worksheet не инициализирован")
+        return False
+    
+    try:
+        all_data = worksheet.get_all_values()
+        if len(all_data) < 2:
+            return False
+        
+        last_row_index = None
+        for i in range(len(all_data)-1, 0, -1):
+            if len(all_data[i]) > 1 and all_data[i][1] == str(user_id):
+                last_row_index = i + 1
+                break
+        
+        if last_row_index:
+            # Получаем текущую заметку
+            current_note = ""
+            if len(all_data[last_row_index-1]) >= 7:
+                current_note = all_data[last_row_index-1][6]
+            
+            # Добавляем новую заметку с датой
+            timestamp = datetime.now().strftime("%d.%m %H:%M")
+            new_note = f"{current_note}\n[{timestamp}] {note}".strip()
+            
+            worksheet.update_cell(last_row_index, 7, new_note)  # колонка G
+            logger.info(f"✅ Заметка добавлена для user {user_id}")
+            return True
+        return False
+    except Exception as e:
+        logger.error(f"❌ Ошибка добавления заметки: {e}")
+        return False
+
+# === ПОЛУЧИТЬ ЗАМЕТКУ ===
+def get_client_note(user_id):
+    if not worksheet:
+        return ""
+    try:
+        all_data = worksheet.get_all_values()
+        for i in range(len(all_data)-1, 0, -1):
+            if len(all_data[i]) > 1 and all_data[i][1] == str(user_id):
+                if len(all_data[i]) >= 7:
+                    return all_data[i][6]
+                return ""
+        return ""
+    except Exception as e:
+        logger.error(f"❌ Ошибка получения заметки: {e}")
+        return ""
+
+# === ЗАПИСЬ В ТАБЛИЦУ ===
+def log_to_sheets(user_id, username, first_name, message_text, status="1️⃣ Новый"):
+    if not worksheet:
         return
     
     try:
         if is_first_message(user_id):
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             row = [
-                timestamp, 
-                str(user_id), 
-                username or "нет", 
-                first_name or "нет", 
-                message_text, 
-                str(stage), 
-                str(topic_id) if topic_id else "", 
-                status
+                timestamp,
+                str(user_id),
+                f"@{username}" if username else "нет",
+                first_name or "нет",
+                message_text,
+                status,
+                ""  # пустая колонка для заметок
             ]
             worksheet.append_row(row)
-            logger.info(f"✅ Новая запись в таблице для user {user_id}")
+            logger.info(f"✅ Новая запись для user {user_id}")
             
-            # При первом сообщении форматируем таблицу (если ещё не отформатирована)
+            # Форматируем при первом добавлении
             try:
                 props = worksheet.spreadsheet.fetch_sheet_metadata(
                     fields="sheets.properties.gridProperties.frozenRowCount"
@@ -254,271 +305,302 @@ def log_to_sheets(user_id, username, first_name, message_text, stage=0, topic_id
                 pass
         else:
             update_client_status(user_id, status)
-            logger.info(f"✅ Обновлён статус для user {user_id}, новая строка не создана")
             
     except Exception as e:
-        logger.error(f"❌ Ошибка записи в таблицу для user {user_id}: {e}")
+        logger.error(f"❌ Ошибка записи: {e}")
 
-# === ИНИЦИАЛИЗАЦИЯ GOOGLE SHEETS ===
-def init_google_sheets():
-    """Подключается к Google Sheets и возвращает объект листа"""
-    logger.info("🔄 Начинаем подключение к Google Sheets...")
-    
-    try:
-        creds_json = os.environ.get('GOOGLE_CREDS_JSON')
-        if not creds_json:
-            logger.error("❌ GOOGLE_CREDS_JSON не найден в переменных окружения")
-            return None
-        
-        logger.info("✅ GOOGLE_CREDS_JSON найден, пробуем распарсить JSON...")
-        
-        try:
-            creds_dict = json.loads(creds_json)
-            logger.info(f"✅ JSON распаршен успешно. client_email: {creds_dict.get('client_email', 'не найден')}")
-        except json.JSONDecodeError as e:
-            logger.error(f"❌ Ошибка парсинга JSON: {e}")
-            return None
-        
-        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-        logger.info(f"🔄 Scope настроен: {scope}")
-        
-        try:
-            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-            logger.info("✅ Credentials созданы успешно")
-        except Exception as e:
-            logger.error(f"❌ Ошибка создания credentials: {e}")
-            return None
-        
-        try:
-            client = gspread.authorize(creds)
-            logger.info("✅ Авторизация в gspread успешна")
-        except Exception as e:
-            logger.error(f"❌ Ошибка авторизации в gspread: {e}")
-            return None
-        
-        logger.info(f"🔄 Пробуем открыть таблицу с ID: {SPREADSHEET_ID}")
-        try:
-            spreadsheet = client.open_by_key(SPREADSHEET_ID)
-            logger.info(f"✅ Таблица открыта успешно. Название: {spreadsheet.title}")
-        except gspread.exceptions.SpreadsheetNotFound:
-            logger.error(f"❌ Таблица с ID {SPREADSHEET_ID} не найдена")
-            return None
-        except gspread.exceptions.APIError as e:
-            logger.error(f"❌ Ошибка API при открытии таблицы: {e}")
-            return None
-        
-        logger.info(f"🔄 Пробуем получить лист с названием '{WORKSHEET_NAME}'")
-        try:
-            worksheet = spreadsheet.worksheet(WORKSHEET_NAME)
-            logger.info(f"✅ Лист '{WORKSHEET_NAME}' найден")
-            
-            headers = worksheet.row_values(1)
-            if "Status" not in headers:
-                logger.info("🔄 Добавляем колонку Status в таблицу")
-                worksheet.add_cols(1)
-                worksheet.update_cell(1, len(headers) + 1, "Status")
-                all_rows = worksheet.get_all_values()
-                for i in range(2, len(all_rows) + 1):
-                    worksheet.update_cell(i, len(headers) + 1, "1️⃣ Новый")
-                logger.info("✅ Колонка Status добавлена")
-            
-            format_worksheet(worksheet)
-            
-        except gspread.exceptions.WorksheetNotFound:
-            logger.info(f"🔄 Лист '{WORKSHEET_NAME}' не найден, создаем новый...")
-            try:
-                worksheet = spreadsheet.add_worksheet(title=WORKSHEET_NAME, rows=1000, cols=20)
-                headers = ["Timestamp", "User ID", "Username", "First Name", "Message", "Stage", "Topic ID", "Status"]
-                worksheet.append_row(headers)
-                logger.info(f"✅ Создан новый лист с заголовками, включая Status")
-                format_worksheet(worksheet)
-            except Exception as e:
-                logger.error(f"❌ Ошибка создания листа: {e}")
-                return None
-        
-        logger.info("🎉 Успешное подключение к Google Sheets!")
-        return worksheet
-        
-    except Exception as e:
-        logger.error(f"❌ Неожиданная ошибка в init_google_sheets: {e}", exc_info=True)
-        return None
-
-# Инициализируем Google Sheets
-logger.info("🔄 Запуск init_google_sheets()...")
-worksheet = init_google_sheets()
-if worksheet:
-    logger.info("✅ Google Sheets инициализирован успешно")
-else:
-    logger.error("❌ Google Sheets НЕ инициализирован")
-
-# === ПОЛУЧЕНИЕ СПИСКА УНИКАЛЬНЫХ ПОЛЬЗОВАТЕЛЕЙ ИЗ ТАБЛИЦЫ ===
-def get_all_users_from_sheets():
-    """Получает список уникальных user_id из Google Sheets"""
+# === ПОЛУЧИТЬ СТАТУС ===
+def get_client_status(user_id):
     if not worksheet:
-        logger.warning("⚠️ Невозможно получить список пользователей: worksheet не инициализирован")
-        return []
+        return "1️⃣ Новый"
     
     try:
         all_data = worksheet.get_all_values()
-        if not all_data or len(all_data) < 2:
+        if len(all_data) < 2:
+            return "1️⃣ Новый"
+        
+        for i in range(len(all_data)-1, 0, -1):
+            if len(all_data[i]) > 1 and all_data[i][1] == str(user_id):
+                if len(all_data[i]) >= 6:
+                    return all_data[i][5]
+                return "1️⃣ Новый"
+        return "1️⃣ Новый"
+    except Exception as e:
+        logger.error(f"❌ Ошибка получения статуса: {e}")
+        return "1️⃣ Новый"
+
+# === ПОЛУЧЕНИЕ СПИСКА ПОЛЬЗОВАТЕЛЕЙ ===
+def get_all_users_from_sheets():
+    if not worksheet:
+        return []
+    try:
+        all_data = worksheet.get_all_values()
+        if len(all_data) < 2:
             return []
         
         users = set()
         for row in all_data[1:]:
             if len(row) > 1 and row[1]:
                 try:
-                    user_id = int(row[1])
-                    users.add(user_id)
-                except (ValueError, TypeError):
+                    users.add(int(row[1]))
+                except:
                     continue
-        
-        user_list = list(users)
-        logger.info(f"📊 Найдено {len(user_list)} уникальных пользователей")
-        return user_list
+        return list(users)
     except Exception as e:
-        logger.error(f"❌ Ошибка получения списка пользователей: {e}")
+        logger.error(f"❌ Ошибка получения списка: {e}")
         return []
 
-# === РАССЫЛКА СООБЩЕНИЙ ===
-async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда для массовой рассылки сообщений всем клиентам"""
-    user_id = update.effective_user.id
-    
-    if user_id != ADMIN_ID:
-        await update.message.reply_text("⛔ Нет прав для этой команды.")
+# === СТАТИСТИКА ===
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает статистику по клиентам"""
+    if update.effective_user.id != ADMIN_ID:
         return
     
-    message = update.message
-    broadcast_text = None
-    
-    if context.args:
-        broadcast_text = " ".join(context.args)
-    elif message.reply_to_message:
-        broadcast_text = message.reply_to_message.text
-    
-    if not broadcast_text:
-        await message.reply_text(
-            "❌ Укажи текст рассылки:\n"
-            "`/broadcast Ваше сообщение`\n\n"
-            "Или используй Reply на любое сообщение: `/broadcast`"
-        )
-        return
-    
-    users = get_all_users_from_sheets()
-    if not users:
-        await message.reply_text("📭 Нет пользователей для рассылки.")
-        return
-    
-    confirm_msg = await message.reply_text(
-        f"📊 **Подтверждение рассылки**\n\n"
-        f"Сообщение:\n`{broadcast_text[:100]}{'...' if len(broadcast_text) > 100 else ''}`\n\n"
-        f"Количество получателей: {len(users)}\n\n"
-        f"Начать рассылку?",
-        reply_markup=InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("✅ Да", callback_data="broadcast_confirm"),
-                InlineKeyboardButton("❌ Нет", callback_data="broadcast_cancel")
-            ]
-        ])
-    )
-    
-    context.user_data['broadcast_data'] = {
-        'text': broadcast_text,
-        'users': users,
-        'confirm_msg_id': confirm_msg.message_id
-    }
-
-# === ОБРАБОТКА ПОДТВЕРЖДЕНИЯ РАССЫЛКИ ===
-async def broadcast_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает подтверждение рассылки"""
-    query = update.callback_query
-    await query.answer()
-    
-    if query.from_user.id != ADMIN_ID:
-        await query.edit_message_text("⛔ Нет прав")
-        return
-    
-    data = query.data
-    
-    if data == "broadcast_cancel":
-        await query.edit_message_text("❌ Рассылка отменена")
-        return
-    
-    if data == "broadcast_confirm":
-        broadcast_data = context.user_data.get('broadcast_data')
-        if not broadcast_data:
-            await query.edit_message_text("❌ Ошибка: данные рассылки не найдены")
-            return
-        
-        await query.edit_message_text(
-            "📤 **Начинаю рассылку...**\n"
-            "Это может занять некоторое время."
-        )
-        
-        text = broadcast_data['text']
-        users = broadcast_data['users']
-        
-        success = 0
-        failed = 0
-        failed_list = []
-        
-        for i, uid in enumerate(users):
-            try:
-                await context.bot.send_message(chat_id=uid, text=text)
-                success += 1
-                logger.info(f"✅ Рассылка: отправлено пользователю {uid}")
-            except Exception as e:
-                failed += 1
-                failed_list.append(str(uid))
-                logger.warning(f"❌ Рассылка: не удалось отправить {uid}: {e}")
-            
-            if (i + 1) % 10 == 0:
-                await query.message.edit_text(
-                    f"📤 **Рассылка в процессе...**\n"
-                    f"Обработано: {i + 1}/{len(users)}\n"
-                    f"✅ Успешно: {success}\n"
-                    f"❌ Ошибок: {failed}"
-                )
-            
-            await asyncio.sleep(0.05)
-        
-        result_text = (
-            f"✅ **Рассылка завершена!**\n\n"
-            f"📊 Статистика:\n"
-            f"• Всего получателей: {len(users)}\n"
-            f"• Успешно отправлено: {success}\n"
-            f"• Ошибок: {failed}"
-        )
-        
-        if failed_list:
-            result_text += f"\n\n❌ Не удалось отправить пользователям:\n" + ", ".join(failed_list[:10])
-            if len(failed_list) > 10:
-                result_text += f" и ещё {len(failed_list) - 10}"
-        
-        await query.message.edit_text(result_text)
-        context.user_data.pop('broadcast_data', None)
-
-# === ПОЛУЧИТЬ ТЕКУЩИЙ СТАТУС ===
-def get_client_status(user_id):
-    """Получает текущий статус клиента из Google Sheets"""
     if not worksheet:
-        return "1️⃣ Новый"
+        await update.message.reply_text("❌ Таблица не подключена")
+        return
     
     try:
         all_data = worksheet.get_all_values()
-        if not all_data:
-            return "1️⃣ Новый"
+        if len(all_data) < 2:
+            await update.message.reply_text("📭 Нет данных")
+            return
         
-        for i in range(len(all_data)-1, 0, -1):
-            if len(all_data[i]) > 1 and all_data[i][1] == str(user_id):
-                if len(all_data[i]) >= 8:
-                    return all_data[i][7]
-                else:
-                    return "1️⃣ Новый"
-        return "1️⃣ Новый"
+        # Общая статистика
+        total_clients = len(set(row[1] for row in all_data[1:] if len(row) > 1))
+        
+        # Статистика по статусам
+        status_counts = {status: 0 for status in CLIENT_STATUSES}
+        last_statuses = {}
+        
+        # Ищем последний статус для каждого клиента
+        for row in reversed(all_data[1:]):
+            if len(row) >= 6 and row[1] not in last_statuses:
+                last_statuses[row[1]] = row[5]
+        
+        for status in last_statuses.values():
+            if status in status_counts:
+                status_counts[status] += 1
+        
+        # Статистика за сегодня/неделю/месяц
+        today = datetime.now().date()
+        week_ago = today - timedelta(days=7)
+        month_ago = today - timedelta(days=30)
+        
+        today_count = 0
+        week_count = 0
+        month_count = 0
+        
+        for row in all_data[1:]:
+            if len(row) >= 1 and row[0]:
+                try:
+                    msg_date = datetime.strptime(row[0].split()[0], "%Y-%m-%d").date()
+                    if msg_date == today:
+                        today_count += 1
+                    if msg_date >= week_ago:
+                        week_count += 1
+                    if msg_date >= month_ago:
+                        month_count += 1
+                except:
+                    continue
+        
+        # Формируем ответ
+        text = "📊 **СТАТИСТИКА**\n\n"
+        text += f"👥 **Всего клиентов:** {total_clients}\n\n"
+        text += "**По статусам:**\n"
+        for status in CLIENT_STATUSES:
+            count = status_counts.get(status, 0)
+            text += f"{status}: {count}\n"
+        
+        text += f"\n📅 **Активность:**\n"
+        text += f"• За сегодня: {today_count} сообщ.\n"
+        text += f"• За неделю: {week_count} сообщ.\n"
+        text += f"• За месяц: {month_count} сообщ.\n"
+        
+        # Активные клиенты (писали сегодня)
+        active_today = set()
+        for row in all_data[1:]:
+            if len(row) >= 2 and row[0]:
+                try:
+                    msg_date = datetime.strptime(row[0].split()[0], "%Y-%m-%d").date()
+                    if msg_date == today:
+                        active_today.add(row[1])
+                except:
+                    continue
+        
+        text += f"\n🔥 **Активных сегодня:** {len(active_today)} клиентов"
+        
+        await update.message.reply_text(text)
+        
     except Exception as e:
-        logger.error(f"❌ Ошибка получения статуса: {e}")
-        return "1️⃣ Новый"
+        logger.error(f"❌ Ошибка статистики: {e}")
+        await update.message.reply_text("❌ Ошибка при получении статистики")
+
+# === ЗАМЕТКИ ===
+async def note_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Добавляет заметку к клиенту /note ID текст или через Reply"""
+    if update.effective_user.id != ADMIN_ID:
+        return
+    
+    message = update.message
+    
+    # Вариант 1: через Reply
+    if message.reply_to_message:
+        original_text = message.reply_to_message.text or ""
+        match = re.search(r'ID: `?(\d+)`?', original_text)
+        
+        if not match:
+            await message.reply_text("❌ Не могу найти ID клиента")
+            return
+        
+        client_id = int(match.group(1))
+        note_text = " ".join(context.args) if context.args else "Без текста"
+        
+        if add_note_to_client(client_id, note_text):
+            await message.reply_text(f"✅ Заметка добавлена к клиенту {client_id}")
+            
+            # Отправляем уведомление в тему
+            if client_id in user_topics:
+                topic_id = user_topics[client_id]
+                await context.bot.send_message(
+                    chat_id=GROUP_ID,
+                    message_thread_id=topic_id,
+                    text=f"📝 **Новая заметка:**\n{note_text}"
+                )
+        else:
+            await message.reply_text("❌ Ошибка при добавлении заметки")
+    
+    # Вариант 2: /note ID текст
+    elif len(context.args) >= 2:
+        try:
+            client_id = int(context.args[0])
+            note_text = " ".join(context.args[1:])
+            
+            if add_note_to_client(client_id, note_text):
+                await message.reply_text(f"✅ Заметка добавлена к клиенту {client_id}")
+                
+                if client_id in user_topics:
+                    topic_id = user_topics[client_id]
+                    await context.bot.send_message(
+                        chat_id=GROUP_ID,
+                        message_thread_id=topic_id,
+                        text=f"📝 **Новая заметка:**\n{note_text}"
+                    )
+            else:
+                await message.reply_text("❌ Ошибка при добавлении заметки")
+        except ValueError:
+            await message.reply_text("❌ Неверный формат. Используй: /note ID текст")
+    else:
+        await message.reply_text(
+            "📝 **Как добавить заметку:**\n"
+            "1. Ответь на сообщение клиента: `/note текст`\n"
+            "2. Или напиши: `/note ID текст`"
+        )
+
+# === ПОИСК ===
+async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Ищет по сообщениям клиентов"""
+    if update.effective_user.id != ADMIN_ID:
+        return
+    
+    if not context.args:
+        await update.message.reply_text("🔍 Используй: /search текст")
+        return
+    
+    search_text = " ".join(context.args).lower()
+    
+    if not worksheet:
+        await update.message.reply_text("❌ Таблица не подключена")
+        return
+    
+    try:
+        all_data = worksheet.get_all_values()
+        if len(all_data) < 2:
+            await update.message.reply_text("📭 Нет данных")
+            return
+        
+        results = []
+        for row in all_data[1:]:
+            if len(row) >= 5 and search_text in row[4].lower():
+                timestamp = row[0] if len(row) > 0 else "?"
+                username = row[2] if len(row) > 2 else "?"
+                message = row[4][:100] + "..." if len(row[4]) > 100 else row[4]
+                
+                results.append(f"• {timestamp} | {username}: {message}")
+        
+        if not results:
+            await update.message.reply_text("🔍 Ничего не найдено")
+            return
+        
+        # Разбиваем на части если много результатов
+        text = f"🔍 **Найдено {len(results)} совпадений:**\n\n"
+        
+        if len(results) > 20:
+            results = results[:20]
+            text += "(показаны первые 20)\n\n"
+        
+        for i, res in enumerate(results, 1):
+            text += f"{i}. {res}\n"
+        
+        # Разбиваем длинные сообщения
+        if len(text) > 4000:
+            parts = [text[i:i+4000] for i in range(0, len(text), 4000)]
+            for part in parts:
+                await update.message.reply_text(part)
+        else:
+            await update.message.reply_text(text)
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка поиска: {e}")
+        await update.message.reply_text("❌ Ошибка при поиске")
+
+# === ИНИЦИАЛИЗАЦИЯ GOOGLE SHEETS ===
+def init_google_sheets():
+    logger.info("🔄 Подключение к Google Sheets...")
+    
+    try:
+        creds_json = os.environ.get('GOOGLE_CREDS_JSON')
+        if not creds_json:
+            logger.error("❌ GOOGLE_CREDS_JSON не найден")
+            return None
+        
+        creds_dict = json.loads(creds_json)
+        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        client = gspread.authorize(creds)
+        
+        spreadsheet = client.open_by_key(SPREADSHEET_ID)
+        
+        try:
+            worksheet = spreadsheet.worksheet(WORKSHEET_NAME)
+            logger.info("✅ Лист найден")
+            
+            # Проверяем заголовки
+            headers = worksheet.row_values(1)
+            new_headers = ["Timestamp", "User ID", "Ник клиента", "Имя", "Сообщение", "Статус", "Заметки"]
+            
+            if headers != new_headers:
+                logger.info("🔄 Обновляем заголовки")
+                worksheet.clear()
+                worksheet.append_row(new_headers)
+                format_worksheet(worksheet)
+            
+        except gspread.exceptions.WorksheetNotFound:
+            logger.info("🔄 Создаём новый лист")
+            worksheet = spreadsheet.add_worksheet(title=WORKSHEET_NAME, rows=1000, cols=7)
+            headers = ["Timestamp", "User ID", "Ник клиента", "Имя", "Сообщение", "Статус", "Заметки"]
+            worksheet.append_row(headers)
+            format_worksheet(worksheet)
+        
+        logger.info("🎉 Google Sheets подключен")
+        return worksheet
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка: {e}")
+        return None
+
+# Инициализация
+worksheet = init_google_sheets()
 
 # === СОХРАНЕНИЕ В ФАЙЛ ===
 def save_message(user_id, username, first_name, text, is_from_admin=False):
@@ -532,12 +614,8 @@ def save_message(user_id, username, first_name, text, is_from_admin=False):
 
 # === СОЗДАНИЕ ТЕМЫ ===
 async def get_or_create_topic(context, user_id, username, first_name):
-    logger.info(f"🔄 get_or_create_topic вызван для user {user_id}")
-    
     if user_id in user_topics:
-        topic_id = user_topics[user_id]
-        logger.info(f"✅ Найдена существующая тема {topic_id} для user {user_id}")
-        return topic_id
+        return user_topics[user_id]
     
     topic_name = f"{first_name} (@{username if username else 'no_username'})"
     
@@ -547,58 +625,85 @@ async def get_or_create_topic(context, user_id, username, first_name):
         user_topics[user_id] = topic_id
         
         current_status = get_client_status(user_id)
+        current_note = get_client_note(user_id)
+        
+        welcome_text = f"🆕 **Новый клиент!**\n"
+        welcome_text += f"Имя: {first_name}\n"
+        welcome_text += f"Username: @{username if username else 'нет'}\n"
+        welcome_text += f"ID: `{user_id}`\n"
+        welcome_text += f"Статус: {current_status}\n"
+        
+        if current_note:
+            welcome_text += f"\n📝 **Заметки:**\n{current_note}"
         
         await context.bot.send_message(
             chat_id=GROUP_ID, message_thread_id=topic_id,
-            text=f"🆕 **Новый клиент!**\n"
-                 f"Имя: {first_name}\n"
-                 f"Username: @{username if username else 'нет'}\n"
-                 f"ID: `{user_id}`\n"
-                 f"Статус: {current_status}\n\n"
-                 f"Используй /status для смены статуса"
+            text=welcome_text
         )
-        logger.info(f"✅ Создана тема {topic_id} для пользователя {user_id}")
         return topic_id
         
     except Exception as e:
-        logger.error(f"❌ Ошибка создания темы для user {user_id}: {e}")
+        logger.error(f"❌ Ошибка создания темы: {e}")
         return None
 
 # === КОМАНДА /START ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    logger.info(f"🚀 Команда /start от пользователя {user.id} (@{user.username})")
-    
     save_message(user.id, user.username or "нет", user.first_name or "нет", "/start")
     
     topic_id = await get_or_create_topic(context, user.id, user.username, user.first_name)
     if not topic_id:
-        await update.message.reply_text("❌ Ошибка. Попробуйте позже.")
+        await update.message.reply_text("❌ Ошибка")
         return
     
-    log_to_sheets(user.id, user.username, user.first_name, "/start", stage=1, topic_id=topic_id)
-    user_stage[user.id] = 1
+    log_to_sheets(user.id, user.username, user.first_name, "/start", status="1️⃣ Новый")
     
     await update.message.reply_text(
         f"Здравствуйте, {user.first_name}! 👋\n\nПодскажите, по какому вопросу хотели бы к нам обратиться?"
     )
-    
     await context.bot.send_message(chat_id=GROUP_ID, message_thread_id=topic_id, text="👤 Клиент начал диалог.")
 
-# === КОМАНДА ДЛЯ СМЕНЫ СТАТУСА ===
-async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда для смены статуса клиента /status [номер]"""
-    if update.effective_user.id != ADMIN_ID:
+# === СООБЩЕНИЯ КЛИЕНТОВ ===
+async def handle_client_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    message = update.message
+    user_id = user.id
+    
+    save_message(user_id, user.username or "нет", user.first_name or "нет", message.text)
+    
+    topic_id = await get_or_create_topic(context, user_id, user.username, user.first_name)
+    if not topic_id:
+        await message.reply_text("❌ Ошибка")
         return
     
-    message = update.message
+    current_status = get_client_status(user_id)
+    current_note = get_client_note(user_id)
+    
+    log_to_sheets(user_id, user.username, user.first_name, message.text, status=current_status)
+    
+    note_text = f"\n\n📝 **Заметка:** {current_note}" if current_note else ""
+    await context.bot.send_message(
+        chat_id=GROUP_ID, 
+        message_thread_id=topic_id, 
+        text=f"👤 **Клиент:**\n{message.text}\n\n**Статус:** {current_status}{note_text}"
+    )
+    
+    # Автоответы
+    if "цен" in message.text.lower() or "стоимост" in message.text.lower():
+        await message.reply_text("💰 Подробную информацию по ценам можете уточнить у нашего менеджера!")
+    else:
+        await message.reply_text("Спасибо за сообщение! Скоро ответим.")
+
+# === КОМАНДА СТАТУС ===
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
     
     keyboard = []
     row = []
     for i, status in enumerate(CLIENT_STATUSES):
         status_num = str(i + 1)
-        button_text = status
-        row.append(InlineKeyboardButton(button_text, callback_data=f"status_{status_num}"))
+        row.append(InlineKeyboardButton(status, callback_data=f"status_{status_num}"))
         if (i + 1) % 2 == 0:
             keyboard.append(row)
             row = []
@@ -606,20 +711,14 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard.append(row)
     
     keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="status_cancel")])
-    reply_markup = InlineKeyboardMarkup(keyboard)
     
-    if message.reply_to_message:
-        await message.reply_text("📊 Выбери новый статус для клиента:", reply_markup=reply_markup)
-    else:
-        await message.reply_text(
-            "📊 Выбери статус для клиента\n\n"
-            "💡 Используй Reply на сообщение клиента, чтобы выбрать статус для конкретного клиента",
-            reply_markup=reply_markup
-        )
+    await update.message.reply_text(
+        "📊 Выбери новый статус для клиента:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
-# === ОБРАБОТКА НАЖАТИЙ НА КНОПКИ ===
+# === ОБРАБОТКА КНОПОК ===
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает нажатия на кнопки статусов и рассылки"""
     query = update.callback_query
     await query.answer()
     
@@ -635,15 +734,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if data.startswith("status_"):
         status_num = data.replace("status_", "")
-        selected_status = None
-        for status in CLIENT_STATUSES:
-            if status.startswith(f"{status_num}️⃣"):
-                selected_status = status
-                break
-        
-        if not selected_status:
-            await query.edit_message_text("❌ Неверный статус")
-            return
+        selected_status = CLIENT_STATUSES[int(status_num) - 1]
         
         if query.message.reply_to_message:
             original_text = query.message.reply_to_message.text or ""
@@ -652,113 +743,111 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if match:
                 client_id = int(match.group(1))
                 if update_client_status(client_id, selected_status):
-                    await query.edit_message_text(
-                        f"✅ Статус клиента обновлён на: {selected_status}"
-                    )
+                    await query.edit_message_text(f"✅ Статус обновлён на: {selected_status}")
                     
                     if client_id in user_topics:
                         topic_id = user_topics[client_id]
-                        try:
-                            await context.bot.send_message(
-                                chat_id=GROUP_ID,
-                                message_thread_id=topic_id,
-                                text=f"📊 **Статус обновлён**\nНовый статус: {selected_status}"
-                            )
-                        except:
-                            pass
+                        await context.bot.send_message(
+                            chat_id=GROUP_ID,
+                            message_thread_id=topic_id,
+                            text=f"📊 **Статус обновлён**\nНовый статус: {selected_status}"
+                        )
                 else:
                     await query.edit_message_text("❌ Ошибка обновления статуса")
             else:
-                await query.edit_message_text("❌ Не могу найти ID клиента. Используй Reply на сообщение клиента.")
+                await query.edit_message_text("❌ Не могу найти ID клиента")
         else:
             await query.edit_message_text("❌ Используй Reply на сообщение клиента")
 
-# === СООБЩЕНИЯ КЛИЕНТОВ ===
-async def handle_client_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    message = update.message
-    user_id = user.id
-    
-    logger.info(f"💬 Сообщение от клиента {user_id}: {message.text[:50]}...")
-    
-    save_message(user_id, user.username or "нет", user.first_name or "нет", message.text)
-    
-    topic_id = await get_or_create_topic(context, user_id, user.username, user.first_name)
-    if not topic_id:
-        await message.reply_text("❌ Ошибка")
+# === РАССЫЛКА ===
+async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
         return
     
-    stage = user_stage.get(user_id, 0)
-    current_status = get_client_status(user_id)
-    log_to_sheets(user_id, user.username, user.first_name, message.text, stage=stage, topic_id=topic_id, status=current_status)
+    message = update.message
+    broadcast_text = None
     
-    await context.bot.send_message(
-        chat_id=GROUP_ID, 
-        message_thread_id=topic_id, 
-        text=f"👤 **Клиент (статус: {current_status}):**\n{message.text}"
+    if context.args:
+        broadcast_text = " ".join(context.args)
+    elif message.reply_to_message:
+        broadcast_text = message.reply_to_message.text
+    
+    if not broadcast_text:
+        await message.reply_text("❌ Укажи текст рассылки: /broadcast текст")
+        return
+    
+    users = get_all_users_from_sheets()
+    if not users:
+        await message.reply_text("📭 Нет пользователей")
+        return
+    
+    await message.reply_text(
+        f"📊 **Подтверждение рассылки**\n\n"
+        f"Сообщение: `{broadcast_text[:100]}{'...' if len(broadcast_text) > 100 else ''}`\n"
+        f"Получателей: {len(users)}\n\n"
+        f"Начать рассылку?",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Да", callback_data="broadcast_confirm"),
+             InlineKeyboardButton("❌ Нет", callback_data="broadcast_cancel")]
+        ])
     )
     
-    if stage == 1:
-        await message.reply_text("Отлично, спасибо за ваш ответ! 👍\n\nВ ближайшее время с вами свяжется наша команда.")
-        user_stage[user_id] = 2
-        await context.bot.send_message(chat_id=GROUP_ID, message_thread_id=topic_id, text="✅ Подтверждение отправлено.")
-    elif stage == 2:
-        await message.reply_text("Остались ли у вас какие-либо вопросы? 🤔")
-        user_stage[user_id] = 3
-        await context.bot.send_message(chat_id=GROUP_ID, message_thread_id=topic_id, text="❓ Вопрос отправлен.")
-    elif stage == 3:
-        await message.reply_text("Если что-то непонятно, обратитесь пожалуйста сюда: @serg.dmitriy 📱\n\nВсегда рады помочь!")
-        user_stage[user_id] = 4
-        await context.bot.send_message(chat_id=GROUP_ID, message_thread_id=topic_id, text="📱 Диалог завершён.")
-    else:
-        await message.reply_text("Если у вас появились новые вопросы, просто напишите нам! 🙌")
-        await context.bot.send_message(chat_id=GROUP_ID, message_thread_id=topic_id, text=f"📨 Новое сообщение:\n{message.text}")
+    context.user_data['broadcast_data'] = {'text': broadcast_text, 'users': users}
 
-# === ОТВЕТЫ АДМИНА ===
-async def handle_admin_reply_in_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.id != GROUP_ID or not update.effective_message.message_thread_id:
+# === ОБРАБОТКА РАССЫЛКИ ===
+async def broadcast_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if query.from_user.id != ADMIN_ID:
         return
     
-    message = update.effective_message
-    topic_id = message.message_thread_id
-    
-    client_id = next((uid for uid, tid in user_topics.items() if tid == topic_id), None)
-    
-    if not client_id:
-        await message.reply_text("❌ Не могу найти клиента.")
+    if query.data == "broadcast_cancel":
+        await query.edit_message_text("❌ Отменено")
         return
     
-    await context.bot.send_message(chat_id=client_id, text=f"{message.text}")
-    save_message(ADMIN_ID, "admin", "Админ", message.text, is_from_admin=True)
-    await message.reply_text("✅ Ответ отправлен клиенту!")
+    if query.data == "broadcast_confirm":
+        data = context.user_data.get('broadcast_data')
+        if not data:
+            await query.edit_message_text("❌ Ошибка")
+            return
+        
+        await query.edit_message_text("📤 **Начинаю рассылку...**\nЭто может занять некоторое время.")
+        
+        text = data['text']
+        users = data['users']
+        success = 0
+        failed = 0
+        failed_list = []
+        
+        for i, uid in enumerate(users):
+            try:
+                await context.bot.send_message(chat_id=uid, text=text)
+                success += 1
+            except Exception as e:
+                failed += 1
+                failed_list.append(str(uid))
+            
+            if (i + 1) % 10 == 0:
+                await query.message.edit_text(
+                    f"📤 **Рассылка в процессе...**\n"
+                    f"Обработано: {i + 1}/{len(users)}\n"
+                    f"✅ Успешно: {success}\n"
+                    f"❌ Ошибок: {failed}"
+                )
+            
+            await asyncio.sleep(0.05)
+        
+        result = f"✅ **Рассылка завершена!**\n\n✅ Успешно: {success}\n❌ Ошибок: {failed}"
+        if failed_list:
+            result += f"\n\n❌ Не удалось отправить: {', '.join(failed_list[:5])}"
+            if len(failed_list) > 5:
+                result += f" и ещё {len(failed_list) - 5}"
+        
+        await query.message.edit_text(result)
+        context.user_data.pop('broadcast_data', None)
 
-# === МЕДИА ===
-async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    message = update.message
-    
-    logger.info(f"📎 Медиа от клиента {user.id}")
-    
-    topic_id = await get_or_create_topic(context, user.id, user.username, user.first_name)
-    if not topic_id:
-        await message.reply_text("❌ Ошибка")
-        return
-    
-    media_type = "фото"
-    if message.video: media_type = "видео"
-    elif message.document: media_type = "документ"
-    elif message.voice: media_type = "голосовое"
-    
-    stage = user_stage.get(user.id, 0)
-    current_status = get_client_status(user.id)
-    log_to_sheets(user.id, user.username, user.first_name, f"[{media_type}]", stage=stage, topic_id=topic_id, status=current_status)
-    
-    await message.forward(chat_id=GROUP_ID, message_thread_id=topic_id)
-    await context.bot.send_message(chat_id=GROUP_ID, message_thread_id=topic_id, text=f"📎 {media_type} от клиента")
-    save_message(user.id, user.username or "нет", user.first_name or "нет", f"[{media_type}]")
-    await message.reply_text("✅ Файл получен!")
-
-# === КОМАНДА ДЛЯ ЛОГОВ ===
+# === КОМАНДА ЛОГОВ ===
 async def admin_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
@@ -773,51 +862,85 @@ async def admin_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # === ПРОВЕРКА SHEETS ===
 async def check_sheets(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    logger.info(f"📊 Команда /check_sheets от пользователя {user_id}")
-    
-    if user_id != ADMIN_ID:
-        logger.warning(f"Пользователь {user_id} не админ, доступ запрещен")
+    if update.effective_user.id != ADMIN_ID:
         return
     
     if worksheet:
         users_count = len(get_all_users_from_sheets())
         await update.message.reply_text(
-            f"✅ Google Sheets подключен и работает!\n"
-            f"📊 Всего уникальных клиентов: {users_count}"
+            f"✅ **Google Sheets подключен**\n"
+            f"📊 Всего клиентов: {users_count}\n"
+            f"📋 Название листа: {WORKSHEET_NAME}"
         )
-        logger.info("✅ Ответ на /check_sheets: подключен")
     else:
-        error_msg = "❌ Google Sheets не подключен. Проверь логи на Render для деталей."
-        await update.message.reply_text(error_msg)
-        logger.error(f"Ответ на /check_sheets: не подключен. worksheet = {worksheet}")
+        await update.message.reply_text("❌ Google Sheets не подключен")
+
+# === ОТВЕТЫ АДМИНА ===
+async def handle_admin_reply_in_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.id != GROUP_ID or not update.effective_message.message_thread_id:
+        return
+    
+    message = update.effective_message
+    topic_id = message.message_thread_id
+    
+    client_id = next((uid for uid, tid in user_topics.items() if tid == topic_id), None)
+    if not client_id:
+        await message.reply_text("❌ Не могу найти клиента")
+        return
+    
+    await context.bot.send_message(chat_id=client_id, text=f"{message.text}")
+    save_message(ADMIN_ID, "admin", "Админ", message.text, is_from_admin=True)
+    await message.reply_text("✅ Ответ отправлен")
+
+# === МЕДИА ===
+async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    message = update.message
+    
+    topic_id = await get_or_create_topic(context, user.id, user.username, user.first_name)
+    if not topic_id:
+        await message.reply_text("❌ Ошибка")
+        return
+    
+    media_type = "фото"
+    if message.video: media_type = "видео"
+    elif message.document: media_type = "документ"
+    elif message.voice: media_type = "голосовое"
+    
+    current_status = get_client_status(user.id)
+    log_to_sheets(user.id, user.username, user.first_name, f"[{media_type}]", status=current_status)
+    
+    await message.forward(chat_id=GROUP_ID, message_thread_id=topic_id)
+    await message.reply_text("✅ Файл получен!")
 
 # === ГЛАВНАЯ ===
 def main():
-    logger.info("🚀 Запуск бота со статусами и рассылкой...")
-    
     app = Application.builder().token(BOT_TOKEN).build()
     
+    # Основные команды
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("admin_logs", admin_logs))
     app.add_handler(CommandHandler("check_sheets", check_sheets))
     app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("broadcast", broadcast_command))
     
+    # Новые команды
+    app.add_handler(CommandHandler("stats", stats_command))
+    app.add_handler(CommandHandler("note", note_command))
+    app.add_handler(CommandHandler("search", search_command))
+    
+    # Обработчики кнопок
     app.add_handler(CallbackQueryHandler(button_callback, pattern="^status_"))
     app.add_handler(CallbackQueryHandler(broadcast_callback, pattern="^broadcast_"))
     
+    # Обработчики сообщений
     app.add_handler(MessageHandler(filters.Chat(GROUP_ID) & filters.TEXT & ~filters.COMMAND, handle_admin_reply_in_topic))
     app.add_handler(MessageHandler(~filters.Chat(ADMIN_ID) & (filters.PHOTO | filters.VIDEO | filters.Document.ALL | filters.VOICE), handle_media))
     app.add_handler(MessageHandler(~filters.Chat(ADMIN_ID) & filters.TEXT & ~filters.COMMAND, handle_client_message))
     
-    logger.info("✅ Обработчики добавлены, запускаем polling...")
     app.run_polling()
 
 if __name__ == "__main__":
-    logger.info("🔄 Запуск health check сервера в отдельном потоке")
     health_thread = threading.Thread(target=run_health_server, daemon=True)
     health_thread.start()
-    
-    logger.info("🔄 Запуск main()")
     main()

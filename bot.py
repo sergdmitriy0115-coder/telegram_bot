@@ -51,15 +51,13 @@ def generate_client_code(user_id):
 
 # GIF для приветствия
 GREETING_GIFS = [
-    "https://media.giphy.com/media/3o7abB06u9bNzA8LC8/giphy.gif",  # волна
-    "https://media.giphy.com/media/JIX9t2j0ZTN9S/giphy.gif",       # печатная машинка
-    "https://media.giphy.com/media/l0MYt5jH6gkLrgNRe/giphy.gif",   # приветствие
+    "https://media.giphy.com/media/3o7abB06u9bNzA8LC8/giphy.gif",
+    "https://media.giphy.com/media/JIX9t2j0ZTN9S/giphy.gif",
+    "https://media.giphy.com/media/l0MYt5jH6gkLrgNRe/giphy.gif",
 ]
 
 # Эффекты для завершения
-COMPLETE_EFFECTS = [
-    "🎉", "✨", "🎊", "🌟", "💫", "⭐", "🎈", "🎆", "🎇", "🔥"
-]
+COMPLETE_EFFECTS = ["🎉", "✨", "🎊", "🌟", "💫", "⭐", "🎈", "🎆", "🎇", "🔥"]
 
 def get_random_complete_effect():
     return " ".join(random.sample(COMPLETE_EFFECTS, 5))

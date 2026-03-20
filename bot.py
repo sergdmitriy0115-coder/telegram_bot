@@ -66,9 +66,13 @@ BUTTONS = {
         {"text": "🎥 YouTube", "value": "YouTube"},
         {"text": "🗣️ Сарафан", "value": "Сарафан"},
         {"text": "📢 Реклама", "value": "Реклама"},
-        {"text": "✍️ Другое (напишу сам)", "value": "other"}
+        {"text": "✍️ Другое (напишу сам)", "value": "other"},
+        {"text": "✅ ГОТОВО", "value": "done"}
     ]
 }
+
+# Для хранения временных ответов на множественный выбор
+user_temp_sources = {}
 
 # Уникальные коды клиентов
 client_codes = {}
@@ -121,7 +125,7 @@ QUESTIONS = {
     1: "Расскажите, над каким проектом работаете? Какая у вас ниша?",
     2: "Понял! А какой сейчас примерный ежемесячный оборот?",
     3: "Спасибо. А в чём сейчас основная сложность с продажами?",
-    4: "Благодарю! И последний вопрос — откуда узнали о нас?"
+    4: "Благодарю! И последний вопрос — откуда узнали о нас? (можно выбрать несколько вариантов)"
 }
 
 # Хранилища
@@ -437,25 +441,36 @@ def get_buttons_for_question(question_type):
         keyboard.append([InlineKeyboardButton(btn["text"], callback_data=f"{question_type}_{btn['value']}")])
     return InlineKeyboardMarkup(keyboard)
 
+def get_source_buttons_with_selected(selected):
+    """Генерирует кнопки для множественного выбора с отметкой выбранных"""
+    keyboard = []
+    for btn in BUTTONS["source"]:
+        if btn["value"] == "done":
+            # Кнопка "ГОТОВО"
+            keyboard.append([InlineKeyboardButton("✅ ГОТОВО", callback_data="source_done")])
+        else:
+            # Добавляем галочку, если вариант выбран
+            text = btn["text"]
+            if btn["value"] in selected:
+                text = "✅ " + text
+            keyboard.append([InlineKeyboardButton(text, callback_data=f"source_select_{btn['value']}")])
+    return InlineKeyboardMarkup(keyboard)
+
 # === ОТЛОЖЕННЫЕ ОТВЕТЫ ===
 async def reminder_callback(context: ContextTypes.DEFAULT_TYPE, user_id: int, attempt: int = 1):
-    """Отправляет напоминание клиенту"""
     if user_id in blacklist:
         return
-    
     stage = user_stage.get(user_id, 0)
     if stage == 0 or stage > 4:
         return
-    
     if attempt == 1:
         await context.bot.send_message(
             chat_id=user_id,
             text="⏰ Я вижу, вы задумались. Если хотите, можете просто написать 'да' или 'нет', я пойму. Или сразу свяжитесь с руководителем."
         )
-        # Запланировать второе напоминание через 10 минут
         context.job_queue.run_once(
             lambda ctx: reminder_callback(ctx, user_id, 2),
-            600,  # 10 минут
+            600,
             name=f"reminder_{user_id}_2"
         )
     elif attempt == 2:
@@ -465,16 +480,12 @@ async def reminder_callback(context: ContextTypes.DEFAULT_TYPE, user_id: int, at
         )
 
 async def schedule_reminder(context: ContextTypes.DEFAULT_TYPE, user_id: int):
-    """Планирует напоминание через 5 минут"""
-    # Отменяем старые напоминания
     for job in context.job_queue.jobs():
         if job.name and job.name.startswith(f"reminder_{user_id}"):
             job.schedule_removal()
-    
-    # Планируем новое
     context.job_queue.run_once(
         lambda ctx: reminder_callback(ctx, user_id, 1),
-        300,  # 5 минут
+        300,
         name=f"reminder_{user_id}_1"
     )
 
@@ -494,9 +505,8 @@ async def get_or_create_topic(context, user_id, username, first_name):
         current_status = get_client_info(user_id).get("status", "Новый") if get_client_info(user_id) else "Новый"
         current_note = get_client_note(user_id)
         
-        # Упрощённое сообщение в тему (без лишних стикеров)
         welcome_text = f"👤 **Новый клиент**\n"
-        welcome_text += f"🔑 Код: `{client_code}`\n"
+        welcome_text += f"🔑 Код: {client_code}\n"
         welcome_text += f"Имя: {first_name}\n"
         welcome_text += f"Username: @{username if username else 'нет'}\n"
         welcome_text += f"Статус: {current_status}\n"
@@ -506,7 +516,11 @@ async def get_or_create_topic(context, user_id, username, first_name):
         if current_note:
             welcome_text += f"\n📝 Заметки: {current_note}\n"
         
-        await context.bot.send_message(chat_id=GROUP_ID, message_thread_id=topic_id, text=welcome_text, parse_mode='Markdown')
+        await context.bot.send_message(
+            chat_id=GROUP_ID,
+            message_thread_id=topic_id,
+            text=welcome_text
+        )
         return topic_id
     except Exception as e:
         logger.error(f"❌ Ошибка создания темы: {e}")
@@ -516,7 +530,14 @@ async def get_or_create_topic(context, user_id, username, first_name):
 async def send_simple_message_to_topic(context, topic_id, client_text, bot_response, status):
     status_emoji = STATUS_EMOJI.get(status, "🟡")
     
-    message = f"👤 Клиент (код {generate_client_code(client_text)}):\n{client_text}\n\n"
+    # Находим код клиента по topic_id
+    client_code = "?"
+    for uid, tid in user_topics.items():
+        if tid == topic_id:
+            client_code = generate_client_code(uid)
+            break
+    
+    message = f"👤 Клиент (код {client_code}):\n{client_text}\n\n"
     message += f"🤖 Бот:\n{bot_response}\n\n"
     message += f"{status_emoji} Статус: {status}"
     
@@ -549,31 +570,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     user_stage[user.id] = 1
-    user_answers[user.id] = {"niche": "", "turnover": "", "problem": "", "source": ""}
+    user_answers[user.id] = {"niche": "", "turnover": "", "problem": "", "source": []}
+    user_temp_sources[user.id] = []
     log_to_sheets(user.id, user.username, user.first_name, "/start", status="Новый")
     
-    # GIF-приветствие
     greeting_gif = random.choice(GREETING_GIFS)
     await context.bot.send_animation(chat_id=user.id, animation=greeting_gif)
     
-    # Текстовое приветствие
     greeting = get_greeting()
     welcome_msg = f"{greeting}, {user.first_name}! 👋\n\nЯ виртуальный помощник ADD production. Мы помогаем выстраивать отделы продаж для онлайн-курсов.\n\nДавайте познакомимся, чтобы я мог передать ваш запрос руководителю."
     
     await update.message.reply_text(welcome_msg)
     
-    # Уведомление в группу
     client_code = generate_client_code(user.id)
     await context.bot.send_message(chat_id=GROUP_ID, message_thread_id=topic_id, text=f"👤 **Новый клиент!**\n🔑 Код: {client_code}\n📝 Начинаем диалог...")
     
-    # Отправляем первый вопрос с кнопками
     await update.message.reply_text(
         QUESTIONS[1],
         reply_markup=get_buttons_for_question("niche")
     )
     log_to_sheets(user.id, user.username, user.first_name, "Вопрос: ниша", status="Уточняем нишу")
-    
-    # Планируем напоминание
     await schedule_reminder(context, user.id)
 
 # === ОБРАБОТКА КНОПОК ===
@@ -586,12 +602,84 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = user.id
     data = query.data
     
-    # Отменяем напоминания
     for job in context.job_queue.jobs():
         if job.name and job.name.startswith(f"reminder_{user_id}"):
             job.schedule_removal()
     
-    # Парсим данные кнопки
+    # Обработка множественного выбора источников
+    if data.startswith("source_select_"):
+        value = data.replace("source_select_", "")
+        selected = user_temp_sources.get(user_id, [])
+        
+        if value in selected:
+            selected.remove(value)
+        else:
+            selected.append(value)
+        
+        user_temp_sources[user_id] = selected
+        
+        # Обновляем сообщение с кнопками
+        await query.edit_message_text(
+            text=QUESTIONS[4],
+            reply_markup=get_source_buttons_with_selected(selected)
+        )
+        return
+    
+    if data == "source_done":
+        selected = user_temp_sources.get(user_id, [])
+        if not selected:
+            await query.edit_message_text("❌ Выберите хотя бы один вариант или нажмите 'Другое'")
+            return
+        
+        answer = ", ".join(selected)
+        
+        answers = user_answers.get(user_id, {"niche": "", "turnover": "", "problem": "", "source": []})
+        answers["source"] = answer
+        user_answers[user_id] = answers
+        
+        is_vip = False
+        if any(x in answers.get("turnover", "") for x in ["Более 3 млн", "3 млн", "3 000 000"]):
+            is_vip = True
+        
+        summary = f"📊 **ВЫЖИМКА**\n\n"
+        summary += f"🔹 **Ниша:** {answers['niche']}\n"
+        summary += f"🔹 **Оборот:** {answers['turnover']}\n"
+        summary += f"🔹 **Проблема:** {answers['problem']}\n"
+        summary += f"🔹 **Источник:** {answer}"
+        
+        if is_vip:
+            summary += f"\n\n🔥 **VIP-КЛИЕНТ!**"
+        
+        add_note_to_client(user_id, summary)
+        log_to_sheets(user_id, user.username or "нет", user.first_name or "нет", f"Источник: {answer}", status="Передан руководителю", source=answer)
+        
+        farewell = f"{get_random_complete_effect()}\n\n"
+        farewell += f"🎉 **СПАСИБО, {user.first_name}!** 🎉\n\n"
+        farewell += f"Мы уже в курсе вашего запроса и скоро свяжемся.\n\n"
+        farewell += f"{get_random_complete_effect()}"
+        
+        await query.edit_message_text(farewell)
+        
+        qr_bio = await generate_qr_code(f"ADD production\nКонтакты: {', '.join(MANAGER_CONTACTS)}")
+        await context.bot.send_photo(chat_id=user_id, photo=qr_bio, caption="📱 Отсканируйте QR-код, чтобы сохранить контакты руководителя")
+        
+        user_stage[user_id] = 5
+        update_client_status(user_id, "Передан руководителю")
+        
+        topic_id = user_topics.get(user_id)
+        if topic_id:
+            await send_simple_message_to_topic(
+                context, topic_id,
+                f"Ответы на все вопросы", 
+                f"Ниша: {answers['niche']}\nОборот: {answers['turnover']}\nПроблема: {answers['problem']}\nИсточник: {answer}",
+                "Передан руководителю"
+            )
+        
+        if user_id in user_temp_sources:
+            del user_temp_sources[user_id]
+        return
+    
+    # Обработка обычных кнопок
     parts = data.split("_", 1)
     if len(parts) < 2:
         await query.edit_message_text("❌ Ошибка")
@@ -601,14 +689,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     answer = parts[1]
     
     stage = user_stage.get(user_id, 1)
-    answers = user_answers.get(user_id, {"niche": "", "turnover": "", "problem": "", "source": ""})
+    answers = user_answers.get(user_id, {"niche": "", "turnover": "", "problem": "", "source": []})
     
-    # Если выбрано "other" — ждём текстовый ответ
     if answer == "other":
         await query.edit_message_text(f"✍️ Напишите свой вариант ответа в чат.")
         return
     
-    # Сохраняем ответ
     if question_type == "niche":
         answers["niche"] = answer
         user_answers[user_id] = answers
@@ -638,65 +724,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif question_type == "problem":
         answers["problem"] = answer
         user_answers[user_id] = answers
-        await query.edit_message_text(f"✅ Принято: {answer}\n\n{QUESTIONS[4]}")
-        await context.bot.send_message(
-            chat_id=user_id,
+        user_temp_sources[user_id] = []
+        await query.edit_message_text(
             text=QUESTIONS[4],
-            reply_markup=get_buttons_for_question("source")
+            reply_markup=get_source_buttons_with_selected([])
         )
         user_stage[user_id] = 4
         update_client_status(user_id, "Уточняем источник")
         await schedule_reminder(context, user_id)
-        
-    elif question_type == "source":
-        answers["source"] = answer
-        user_answers[user_id] = answers
-        
-        # Проверка на VIP (оборот больше 3 млн)
-        is_vip = False
-        if "Более 3 млн" in answers["turnover"] or "3 млн" in answers["turnover"]:
-            is_vip = True
-        
-        # Формируем выжимку
-        summary = f"📊 **ВЫЖИМКА**\n\n"
-        summary += f"🔹 **Ниша:** {answers['niche']}\n"
-        summary += f"🔹 **Оборот:** {answers['turnover']}\n"
-        summary += f"🔹 **Проблема:** {answers['problem']}\n"
-        summary += f"🔹 **Источник:** {answer}"
-        
-        if is_vip:
-            summary += f"\n\n🔥 **VIP-КЛИЕНТ!**"
-        
-        # Добавляем выжимку в заметки
-        add_note_to_client(user_id, summary)
-        
-        # Сохраняем источник в таблицу
-        log_to_sheets(user_id, user.username or "нет", user.first_name or "нет", f"Источник: {answer}", status="Передан руководителю", source=answer)
-        
-        # Прощание
-        farewell = f"{get_random_complete_effect()}\n\n"
-        farewell += f"🎉 **СПАСИБО, {user.first_name}!** 🎉\n\n"
-        farewell += f"Мы уже в курсе вашего запроса и скоро свяжемся.\n\n"
-        farewell += f"{get_random_complete_effect()}"
-        
-        await query.edit_message_text(farewell)
-        
-        # QR-код
-        qr_bio = await generate_qr_code(f"ADD production\nКонтакты: {', '.join(MANAGER_CONTACTS)}")
-        await context.bot.send_photo(chat_id=user_id, photo=qr_bio, caption="📱 Отсканируйте QR-код, чтобы сохранить контакты руководителя")
-        
-        user_stage[user_id] = 5
-        update_client_status(user_id, "Передан руководителю")
-        
-        # Упрощённое сообщение в тему
-        topic_id = user_topics.get(user_id)
-        if topic_id:
-            await send_simple_message_to_topic(
-                context, topic_id,
-                f"Ответы на все вопросы", 
-                f"Ниша: {answers['niche']}\nОборот: {answers['turnover']}\nПроблема: {answers['problem']}\nИсточник: {answer}",
-                "Передан руководителю"
-            )
 
 # === ОБРАБОТКА ТЕКСТОВЫХ СООБЩЕНИЙ (СВОБОДНЫЙ ВВОД) ===
 @catch_errors
@@ -718,21 +753,18 @@ async def handle_client_message(update: Update, context: ContextTypes.DEFAULT_TY
         await message.reply_text("❌ Ошибка")
         return
     
-    # Отменяем напоминания
     for job in context.job_queue.jobs():
         if job.name and job.name.startswith(f"reminder_{user_id}"):
             job.schedule_removal()
     
     stage = user_stage.get(user_id, 1)
-    answers = user_answers.get(user_id, {"niche": "", "turnover": "", "problem": "", "source": ""})
+    answers = user_answers.get(user_id, {"niche": "", "turnover": "", "problem": "", "source": []})
     
-    # Проверяем, не завершён ли диалог
     client_info = get_client_info(user_id)
     if client_info and client_info.get("status") in ["Передан руководителю", "Отказ"]:
         await message.reply_text(f"Ваш запрос уже передан руководителю. Если у вас остались вопросы, можете написать напрямую: {', '.join(MANAGER_CONTACTS)}")
         return
     
-    # Экстренные сценарии
     msg_lower = message.text.lower()
     if any(word in msg_lower for word in ["позвоните", "свяжитесь", "напишите", "человек", "менеджер"]):
         await message.reply_text(f"Я передаю ваш запрос руководителю. Он свяжется с вами в ближайшее время.\n\nКонтакты: @Darya_Pril06 или @anny_nizh.")
@@ -755,7 +787,6 @@ async def handle_client_message(update: Update, context: ContextTypes.DEFAULT_TY
         answers["turnover"] = message.text[:100]
         user_answers[user_id] = answers
         
-        # Проверка на VIP
         turnover_text = message.text.lower()
         if any(x in turnover_text for x in ["3 млн", "3 000 000", "3000000", "более 3", "больше 3"]):
             add_note_to_client(user_id, "🔥 VIP-КЛИЕНТ (оборот более 3 млн)")
@@ -771,24 +802,24 @@ async def handle_client_message(update: Update, context: ContextTypes.DEFAULT_TY
     elif stage == 3:
         answers["problem"] = message.text[:300]
         user_answers[user_id] = answers
+        user_temp_sources[user_id] = []
         await message.reply_text(
-            QUESTIONS[4],
-            reply_markup=get_buttons_for_question("source")
+            text=QUESTIONS[4],
+            reply_markup=get_source_buttons_with_selected([])
         )
         user_stage[user_id] = 4
         update_client_status(user_id, "Уточняем источник")
         await schedule_reminder(context, user_id)
         
     elif stage == 4:
+        # Если клиент пишет текстом вместо кнопок
         answers["source"] = message.text[:100]
         user_answers[user_id] = answers
         
-        # Проверка на VIP
         is_vip = False
-        if any(x in answers["turnover"] for x in ["Более 3 млн", "3 млн", "3 000 000"]):
+        if any(x in answers.get("turnover", "") for x in ["Более 3 млн", "3 млн", "3 000 000"]):
             is_vip = True
         
-        # Формируем выжимку
         summary = f"📊 **ВЫЖИМКА**\n\n"
         summary += f"🔹 **Ниша:** {answers['niche']}\n"
         summary += f"🔹 **Оборот:** {answers['turnover']}\n"
@@ -801,7 +832,6 @@ async def handle_client_message(update: Update, context: ContextTypes.DEFAULT_TY
         add_note_to_client(user_id, summary)
         log_to_sheets(user_id, user.username or "нет", user.first_name or "нет", f"Источник: {answers['source']}", status="Передан руководителю", source=answers['source'])
         
-        # Прощание
         farewell = f"{get_random_complete_effect()}\n\n"
         farewell += f"🎉 **СПАСИБО, {user.first_name}!** 🎉\n\n"
         farewell += f"Мы уже в курсе вашего запроса и скоро свяжемся.\n\n"
@@ -809,14 +839,12 @@ async def handle_client_message(update: Update, context: ContextTypes.DEFAULT_TY
         
         await message.reply_text(farewell)
         
-        # QR-код
         qr_bio = await generate_qr_code(f"ADD production\nКонтакты: {', '.join(MANAGER_CONTACTS)}")
         await context.bot.send_photo(chat_id=user_id, photo=qr_bio, caption="📱 Отсканируйте QR-код, чтобы сохранить контакты руководителя")
         
         user_stage[user_id] = 5
         update_client_status(user_id, "Передан руководителю")
         
-        # Упрощённое сообщение в тему
         await send_simple_message_to_topic(
             context, topic_id,
             f"Ответы на все вопросы", 
@@ -848,15 +876,15 @@ async def sources_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         for row in all_data[1:]:
             if len(row) >= 8 and row[7]:
-                source = row[7]
-                source_counts[source] = source_counts.get(source, 0) + 1
-                total += 1
+                sources = row[7].split(", ")
+                for source in sources:
+                    source_counts[source] = source_counts.get(source, 0) + 1
+                    total += 1
         
         if total == 0:
             await update.message.reply_text("📭 Нет данных об источниках")
             return
         
-        # Сортируем по убыванию
         sorted_sources = sorted(source_counts.items(), key=lambda x: x[1], reverse=True)
         
         text = f"📊 **ИСТОЧНИКИ КЛИЕНТОВ**\n\n"
@@ -866,7 +894,7 @@ async def sources_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             bar = "█" * percentage + "░" * (20 - percentage)
             text += f"{source}\n{bar} {count} ({int(count/total*100)}%)\n\n"
         
-        text += f"👥 **Всего:** {total}"
+        text += f"👥 **Всего ответов:** {total}"
         
         await update.message.reply_text(text)
         
@@ -1409,7 +1437,7 @@ def main():
     app.add_handler(CommandHandler("active", active_command))
     app.add_handler(CommandHandler("timeline", timeline_command))
     
-    app.add_handler(CallbackQueryHandler(button_callback, pattern="^(niche|turnover|problem|source)_"))
+    app.add_handler(CallbackQueryHandler(button_callback, pattern="^(niche|turnover|problem|source_select|source_done)_"))
     app.add_handler(CallbackQueryHandler(broadcast_callback, pattern="^broadcast_"))
     
     app.add_handler(MessageHandler(filters.Chat(GROUP_ID) & filters.TEXT & ~filters.COMMAND, handle_admin_reply_in_topic))

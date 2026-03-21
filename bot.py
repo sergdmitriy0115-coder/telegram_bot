@@ -25,18 +25,8 @@ LOG_FILE = "logs.txt"
 SPREADSHEET_ID = "15vlEZ0Q6OmQh51DsA9B_fgiLwed12ekroz1aeWsgXVI"
 WORKSHEET_NAME = "Логи клиентов"
 
-# --- СТАТУСЫ ---
-CLIENT_STATUSES = [
-    "Новый",
-    "Уточняем нишу",
-    "Уточняем оборот",
-    "Уточняем проблему",
-    "Уточняем источник",
-    "Готов к передаче",
-    "Передан руководителю",
-    "Нецелевой",
-    "Отказ"
-]
+# --- QR-код для канала ---
+QR_TEXT = "https://t.me/add_production"  # Ссылка на твой канал/аккаунт
 
 # --- КНОПКИ ---
 BUTTONS = {
@@ -498,6 +488,7 @@ async def get_or_create_topic(context, user_id, username, first_name):
         current_status = get_client_info(user_id).get("status", "Новый") if get_client_info(user_id) else "Новый"
         current_note = get_client_note(user_id)
         
+        # Формируем сообщение для темы
         welcome_text = f"👤 **Новый клиент**\n"
         welcome_text += f"🔑 Код: {client_code}\n"
         welcome_text += f"Имя: {first_name}\n"
@@ -509,11 +500,27 @@ async def get_or_create_topic(context, user_id, username, first_name):
         if current_note:
             welcome_text += f"\n📝 Заметки: {current_note}\n"
         
+        # Отправляем сообщение в тему
         await context.bot.send_message(
             chat_id=GROUP_ID,
             message_thread_id=topic_id,
             text=welcome_text
         )
+        
+        # Пытаемся получить аватарку клиента и отправить в тему
+        try:
+            user_photos = await context.bot.get_user_profile_photos(user_id, limit=1)
+            if user_photos.total_count > 0:
+                photo = user_photos.photos[0][-1].file_id
+                await context.bot.send_photo(
+                    chat_id=GROUP_ID,
+                    message_thread_id=topic_id,
+                    photo=photo,
+                    caption=f"🖼️ Аватар клиента: {first_name}"
+                )
+        except Exception as e:
+            logger.warning(f"Не удалось получить аватар для {user_id}: {e}")
+        
         return topic_id
     except Exception as e:
         logger.error(f"❌ Ошибка создания темы: {e}")
@@ -572,7 +579,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             prev_stage = stage - 1
             user_stage[user_id] = prev_stage
             
-            # Восстанавливаем предыдущий ответ (он уже есть в answers)
             prev_question = ["niche", "turnover", "problem", "source"][prev_stage - 1]
             prev_answer = answers.get(prev_question, "")
             
@@ -587,15 +593,24 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Обработка кнопки "Связаться с человеком"
     if answer == "human":
+        # QR-код для @add_production
+        qr_bio = await generate_qr_code(QR_TEXT)
+        await context.bot.send_photo(
+            chat_id=user_id,
+            photo=qr_bio,
+            caption=f"📱 Подписывайтесь на наш канал: @add_production\n\nИли свяжитесь с руководителями:\n{', '.join(MANAGER_CONTACTS)}"
+        )
+        
+        # Отдельное сообщение с контактами
+        contacts_msg = f"📞 Ваш запрос уже передан руководителю. Если у вас остались вопросы, можете написать напрямую:\n{', '.join(MANAGER_CONTACTS)}"
+        await context.bot.send_message(chat_id=user_id, text=contacts_msg)
+        
+        # Прощание
         farewell = f"{get_random_complete_effect()}\n\n"
         farewell += f"🎉 **СПАСИБО, {user.first_name}!** 🎉\n\n"
         farewell += f"Мы уже в курсе вашего запроса и скоро свяжемся.\n\n"
         farewell += f"{get_random_complete_effect()}"
-        
-        await query.edit_message_text(farewell)
-        
-        qr_bio = await generate_qr_code(f"ADD production\nКонтакты: {', '.join(MANAGER_CONTACTS)}")
-        await context.bot.send_photo(chat_id=user_id, photo=qr_bio, caption="📱 Отсканируйте QR-код, чтобы сохранить контакты руководителя")
+        await context.bot.send_message(chat_id=user_id, text=farewell)
         
         user_stage[user_id] = 5
         update_client_status(user_id, "Передан руководителю")
@@ -673,15 +688,24 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         add_note_to_client(user_id, summary)
         log_to_sheets(user_id, user.username or "нет", user.first_name or "нет", f"Источник: {answer}", status="Передан руководителю", source=answer)
         
+        # QR-код для @add_production
+        qr_bio = await generate_qr_code(QR_TEXT)
+        await context.bot.send_photo(
+            chat_id=user_id,
+            photo=qr_bio,
+            caption=f"📱 Подписывайтесь на наш канал: @add_production\n\nИли свяжитесь с руководителями:\n{', '.join(MANAGER_CONTACTS)}"
+        )
+        
+        # Отдельное сообщение с контактами
+        contacts_msg = f"📞 Ваш запрос уже передан руководителю. Если у вас остались вопросы, можете написать напрямую:\n{', '.join(MANAGER_CONTACTS)}"
+        await context.bot.send_message(chat_id=user_id, text=contacts_msg)
+        
+        # Прощание
         farewell = f"{get_random_complete_effect()}\n\n"
         farewell += f"🎉 **СПАСИБО, {user.first_name}!** 🎉\n\n"
         farewell += f"Мы уже в курсе вашего запроса и скоро свяжемся.\n\n"
         farewell += f"{get_random_complete_effect()}"
-        
-        await query.edit_message_text(farewell)
-        
-        qr_bio = await generate_qr_code(f"ADD production\nКонтакты: {', '.join(MANAGER_CONTACTS)}")
-        await context.bot.send_photo(chat_id=user_id, photo=qr_bio, caption="📱 Отсканируйте QR-код, чтобы сохранить контакты руководителя")
+        await context.bot.send_message(chat_id=user_id, text=farewell)
         
         user_stage[user_id] = 5
         update_client_status(user_id, "Передан руководителю")
@@ -773,15 +797,22 @@ async def handle_client_message(update: Update, context: ContextTypes.DEFAULT_TY
     
     msg_lower = message.text.lower()
     if any(word in msg_lower for word in ["позвоните", "свяжитесь", "напишите", "человек", "менеджер"]):
+        # QR-код для @add_production
+        qr_bio = await generate_qr_code(QR_TEXT)
+        await context.bot.send_photo(
+            chat_id=user_id,
+            photo=qr_bio,
+            caption=f"📱 Подписывайтесь на наш канал: @add_production\n\nИли свяжитесь с руководителями:\n{', '.join(MANAGER_CONTACTS)}"
+        )
+        
+        contacts_msg = f"📞 Ваш запрос уже передан руководителю. Если у вас остались вопросы, можете написать напрямую:\n{', '.join(MANAGER_CONTACTS)}"
+        await context.bot.send_message(chat_id=user_id, text=contacts_msg)
+        
         farewell = f"{get_random_complete_effect()}\n\n"
         farewell += f"🎉 **СПАСИБО, {user.first_name}!** 🎉\n\n"
         farewell += f"Мы уже в курсе вашего запроса и скоро свяжемся.\n\n"
         farewell += f"{get_random_complete_effect()}"
-        
-        await message.reply_text(farewell)
-        
-        qr_bio = await generate_qr_code(f"ADD production\nКонтакты: {', '.join(MANAGER_CONTACTS)}")
-        await context.bot.send_photo(chat_id=user_id, photo=qr_bio, caption="📱 Отсканируйте QR-код, чтобы сохранить контакты руководителя")
+        await context.bot.send_message(chat_id=user_id, text=farewell)
         
         user_stage[user_id] = 5
         update_client_status(user_id, "Передан руководителю")
@@ -852,15 +883,22 @@ async def handle_client_message(update: Update, context: ContextTypes.DEFAULT_TY
         add_note_to_client(user_id, summary)
         log_to_sheets(user_id, user.username or "нет", user.first_name or "нет", f"Источник: {answers['source']}", status="Передан руководителю", source=answers['source'])
         
+        # QR-код для @add_production
+        qr_bio = await generate_qr_code(QR_TEXT)
+        await context.bot.send_photo(
+            chat_id=user_id,
+            photo=qr_bio,
+            caption=f"📱 Подписывайтесь на наш канал: @add_production\n\nИли свяжитесь с руководителями:\n{', '.join(MANAGER_CONTACTS)}"
+        )
+        
+        contacts_msg = f"📞 Ваш запрос уже передан руководителю. Если у вас остались вопросы, можете написать напрямую:\n{', '.join(MANAGER_CONTACTS)}"
+        await context.bot.send_message(chat_id=user_id, text=contacts_msg)
+        
         farewell = f"{get_random_complete_effect()}\n\n"
         farewell += f"🎉 **СПАСИБО, {user.first_name}!** 🎉\n\n"
         farewell += f"Мы уже в курсе вашего запроса и скоро свяжемся.\n\n"
         farewell += f"{get_random_complete_effect()}"
-        
-        await message.reply_text(farewell)
-        
-        qr_bio = await generate_qr_code(f"ADD production\nКонтакты: {', '.join(MANAGER_CONTACTS)}")
-        await context.bot.send_photo(chat_id=user_id, photo=qr_bio, caption="📱 Отсканируйте QR-код, чтобы сохранить контакты руководителя")
+        await context.bot.send_message(chat_id=user_id, text=farewell)
         
         user_stage[user_id] = 5
         update_client_status(user_id, "Передан руководителю")

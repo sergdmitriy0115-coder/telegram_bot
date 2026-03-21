@@ -44,21 +44,27 @@ BUTTONS = {
         {"text": "📚 Онлайн-курс", "value": "Онлайн-курс"},
         {"text": "📘 Инфопродукт", "value": "Инфопродукт"},
         {"text": "🎓 Наставничество", "value": "Наставничество"},
-        {"text": "✍️ Другое (напишу сам)", "value": "other"}
+        {"text": "✍️ Другое (напишу сам)", "value": "other"},
+        {"text": "👤 Связаться с человеком", "value": "human"},
+        {"text": "◀️ Назад", "value": "back"}
     ],
     "turnover": [
         {"text": "💰 До 500 тыс", "value": "До 500 тыс ₽"},
         {"text": "💰 500 тыс – 1 млн", "value": "500 тыс – 1 млн ₽"},
         {"text": "💰 1 млн – 3 млн", "value": "1 млн – 3 млн ₽"},
         {"text": "💰 Более 3 млн", "value": "Более 3 млн ₽"},
-        {"text": "✍️ Напишу сам", "value": "other"}
+        {"text": "✍️ Напишу сам", "value": "other"},
+        {"text": "👤 Связаться с человеком", "value": "human"},
+        {"text": "◀️ Назад", "value": "back"}
     ],
     "problem": [
         {"text": "📉 Мало лидов", "value": "Мало лидов"},
         {"text": "🔄 Низкая конверсия", "value": "Низкая конверсия"},
         {"text": "💸 Дорогое привлечение", "value": "Дорогое привлечение"},
         {"text": "👥 Сложно нанять менеджеров", "value": "Сложно нанять менеджеров"},
-        {"text": "✍️ Другое (напишу сам)", "value": "other"}
+        {"text": "✍️ Другое (напишу сам)", "value": "other"},
+        {"text": "👤 Связаться с человеком", "value": "human"},
+        {"text": "◀️ Назад", "value": "back"}
     ],
     "source": [
         {"text": "📸 Instagram", "value": "Instagram"},
@@ -67,8 +73,21 @@ BUTTONS = {
         {"text": "🗣️ Сарафан", "value": "Сарафан"},
         {"text": "📢 Реклама", "value": "Реклама"},
         {"text": "✍️ Другое (напишу сам)", "value": "other"},
-        {"text": "✅ ГОТОВО", "value": "done"}
+        {"text": "👤 Связаться с человеком", "value": "human"},
+        {"text": "◀️ Назад", "value": "back"}
     ]
+}
+
+# Вопросы с индикатором этапа
+def get_question_with_stage(question_num, total=4):
+    stages = ["нишу", "оборот", "проблему", "источник"]
+    return f"📊 Этап {question_num}/{total}: {QUESTIONS[question_num]}\n\n{stages[question_num-1]}"
+
+QUESTIONS = {
+    1: "Расскажите, над каким проектом работаете? Какая у вас ниша?",
+    2: "Понял! А какой сейчас примерный ежемесячный оборот?",
+    3: "Спасибо. А в чём сейчас основная сложность с продажами?",
+    4: "Благодарю! И последний вопрос — откуда узнали о нас?"
 }
 
 # Хранилища
@@ -76,11 +95,10 @@ user_topics = {}
 blacklist = set()
 user_stage = {}
 user_answers = {}
-user_temp_sources = {}
-client_codes = {}
 admin_actions_log = []
+client_codes = {}
 
-# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
+# Вспомогательные функции
 def generate_client_code(user_id):
     if str(user_id) not in client_codes:
         year = datetime.now().year
@@ -122,13 +140,6 @@ def get_greeting():
         return "Добрый вечер"
     else:
         return "Доброй ночи"
-
-QUESTIONS = {
-    1: "Расскажите, над каким проектом работаете? Какая у вас ниша?",
-    2: "Понял! А какой сейчас примерный ежемесячный оборот?",
-    3: "Спасибо. А в чём сейчас основная сложность с продажами?",
-    4: "Благодарю! И последний вопрос — откуда узнали о нас? (можно выбрать несколько вариантов)"
-}
 
 # --- ЛОГИРОВАНИЕ ---
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
@@ -438,18 +449,6 @@ def get_buttons_for_question(question_type):
         keyboard.append([InlineKeyboardButton(btn["text"], callback_data=f"{question_type}_{btn['value']}")])
     return InlineKeyboardMarkup(keyboard)
 
-def get_source_buttons_with_selected(selected):
-    keyboard = []
-    for btn in BUTTONS["source"]:
-        if btn["value"] == "done":
-            keyboard.append([InlineKeyboardButton("✅ ГОТОВО", callback_data="source_done")])
-        else:
-            text = btn["text"]
-            if btn["value"] in selected:
-                text = "✅ " + text
-            keyboard.append([InlineKeyboardButton(text, callback_data=f"source_select_{btn['value']}")])
-    return InlineKeyboardMarkup(keyboard)
-
 # === ОТЛОЖЕННЫЕ ОТВЕТЫ ===
 async def reminder_callback(context: ContextTypes.DEFAULT_TYPE, user_id: int, attempt: int = 1):
     if user_id in blacklist:
@@ -540,6 +539,162 @@ async def send_simple_message_to_topic(context, topic_id, client_text, bot_respo
         text=message
     )
 
+# === ОБРАБОТКА КНОПОК ===
+@catch_errors
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user = query.from_user
+    user_id = user.id
+    data = query.data
+    
+    logger.info(f"🔘 Кнопка нажата: {data} от {user_id}")
+    
+    for job in context.job_queue.jobs():
+        if job.name and job.name.startswith(f"reminder_{user_id}"):
+            job.schedule_removal()
+    
+    parts = data.split("_", 1)
+    if len(parts) < 2:
+        await query.edit_message_text("❌ Ошибка")
+        return
+    
+    question_type = parts[0]
+    answer = parts[1]
+    
+    stage = user_stage.get(user_id, 1)
+    answers = user_answers.get(user_id, {"niche": "", "turnover": "", "problem": "", "source": ""})
+    
+    # Обработка кнопки "Назад"
+    if answer == "back":
+        if stage > 1:
+            prev_stage = stage - 1
+            user_stage[user_id] = prev_stage
+            
+            # Восстанавливаем предыдущий ответ (он уже есть в answers)
+            prev_question = ["niche", "turnover", "problem", "source"][prev_stage - 1]
+            prev_answer = answers.get(prev_question, "")
+            
+            await query.edit_message_text(
+                text=f"◀️ Вы вернулись к предыдущему вопросу\n\n{get_question_with_stage(prev_stage, 4)}",
+                reply_markup=get_buttons_for_question(prev_question)
+            )
+            update_client_status(user_id, [CLIENT_STATUSES[prev_stage], CLIENT_STATUSES[prev_stage+1]][prev_stage])
+        else:
+            await query.edit_message_text("❌ Это первый вопрос, назад нельзя")
+        return
+    
+    # Обработка кнопки "Связаться с человеком"
+    if answer == "human":
+        farewell = f"{get_random_complete_effect()}\n\n"
+        farewell += f"🎉 **СПАСИБО, {user.first_name}!** 🎉\n\n"
+        farewell += f"Мы уже в курсе вашего запроса и скоро свяжемся.\n\n"
+        farewell += f"{get_random_complete_effect()}"
+        
+        await query.edit_message_text(farewell)
+        
+        qr_bio = await generate_qr_code(f"ADD production\nКонтакты: {', '.join(MANAGER_CONTACTS)}")
+        await context.bot.send_photo(chat_id=user_id, photo=qr_bio, caption="📱 Отсканируйте QR-код, чтобы сохранить контакты руководителя")
+        
+        user_stage[user_id] = 5
+        update_client_status(user_id, "Передан руководителю")
+        
+        topic_id = user_topics.get(user_id)
+        if topic_id:
+            await send_simple_message_to_topic(
+                context, topic_id,
+                "Клиент запросил связь с человеком", 
+                "Передан руководителю",
+                "Передан руководителю"
+            )
+        return
+    
+    if answer == "other":
+        await query.edit_message_text(f"✍️ Напишите свой вариант ответа в чат.")
+        return
+    
+    if question_type == "niche":
+        answers["niche"] = answer
+        user_answers[user_id] = answers
+        await query.edit_message_text(f"✅ Принято: {answer}\n\n{get_question_with_stage(2, 4)}")
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=get_question_with_stage(2, 4),
+            reply_markup=get_buttons_for_question("turnover")
+        )
+        user_stage[user_id] = 2
+        update_client_status(user_id, "Уточняем оборот")
+        await schedule_reminder(context, user_id)
+        
+    elif question_type == "turnover":
+        answers["turnover"] = answer
+        user_answers[user_id] = answers
+        await query.edit_message_text(f"✅ Принято: {answer}\n\n{get_question_with_stage(3, 4)}")
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=get_question_with_stage(3, 4),
+            reply_markup=get_buttons_for_question("problem")
+        )
+        user_stage[user_id] = 3
+        update_client_status(user_id, "Уточняем проблему")
+        await schedule_reminder(context, user_id)
+        
+    elif question_type == "problem":
+        answers["problem"] = answer
+        user_answers[user_id] = answers
+        await query.edit_message_text(f"✅ Принято: {answer}\n\n{get_question_with_stage(4, 4)}")
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=get_question_with_stage(4, 4),
+            reply_markup=get_buttons_for_question("source")
+        )
+        user_stage[user_id] = 4
+        update_client_status(user_id, "Уточняем источник")
+        await schedule_reminder(context, user_id)
+        
+    elif question_type == "source":
+        answers["source"] = answer
+        user_answers[user_id] = answers
+        
+        is_vip = False
+        if any(x in answers.get("turnover", "") for x in ["Более 3 млн", "3 млн", "3 000 000"]):
+            is_vip = True
+        
+        summary = f"📊 **ВЫЖИМКА**\n\n"
+        summary += f"🔹 **Ниша:** {answers['niche']}\n"
+        summary += f"🔹 **Оборот:** {answers['turnover']}\n"
+        summary += f"🔹 **Проблема:** {answers['problem']}\n"
+        summary += f"🔹 **Источник:** {answer}"
+        
+        if is_vip:
+            summary += f"\n\n🔥 **VIP-КЛИЕНТ!**"
+        
+        add_note_to_client(user_id, summary)
+        log_to_sheets(user_id, user.username or "нет", user.first_name or "нет", f"Источник: {answer}", status="Передан руководителю", source=answer)
+        
+        farewell = f"{get_random_complete_effect()}\n\n"
+        farewell += f"🎉 **СПАСИБО, {user.first_name}!** 🎉\n\n"
+        farewell += f"Мы уже в курсе вашего запроса и скоро свяжемся.\n\n"
+        farewell += f"{get_random_complete_effect()}"
+        
+        await query.edit_message_text(farewell)
+        
+        qr_bio = await generate_qr_code(f"ADD production\nКонтакты: {', '.join(MANAGER_CONTACTS)}")
+        await context.bot.send_photo(chat_id=user_id, photo=qr_bio, caption="📱 Отсканируйте QR-код, чтобы сохранить контакты руководителя")
+        
+        user_stage[user_id] = 5
+        update_client_status(user_id, "Передан руководителю")
+        
+        topic_id = user_topics.get(user_id)
+        if topic_id:
+            await send_simple_message_to_topic(
+                context, topic_id,
+                f"Ответы на все вопросы", 
+                f"Ниша: {answers['niche']}\nОборот: {answers['turnover']}\nПроблема: {answers['problem']}\nИсточник: {answer}",
+                "Передан руководителю"
+            )
+
 # === ОСНОВНОЙ ОБРАБОТЧИК ===
 @catch_errors
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -563,15 +718,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     user_stage[user.id] = 1
-    user_answers[user.id] = {"niche": "", "turnover": "", "problem": "", "source": []}
-    user_temp_sources[user.id] = []
+    user_answers[user.id] = {"niche": "", "turnover": "", "problem": "", "source": ""}
     log_to_sheets(user.id, user.username, user.first_name, "/start", status="Новый")
     
     greeting_gif = random.choice(GREETING_GIFS)
     await context.bot.send_animation(chat_id=user.id, animation=greeting_gif)
     
     greeting = get_greeting()
-    welcome_msg = f"{greeting}, {user.first_name}! 👋\n\nЯ виртуальный помощник ADD production. Мы помогаем выстраивать отделы продаж для онлайн-курсов.\n\nДавайте познакомимся, чтобы я мог передать ваш запрос руководителю."
+    welcome_msg = f"{greeting}, {user.first_name}! 👋\n\nЯ виртуальный помощник ADD production. Мы помогаем выстраивать отделы продаж для онлайн-курсов.\n\nДавайте познакомимся, чтобы я мог передать ваш запрос руководителю.\n\n📊 Этап 1/4"
     
     await update.message.reply_text(welcome_msg)
     
@@ -579,159 +733,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(chat_id=GROUP_ID, message_thread_id=topic_id, text=f"👤 **Новый клиент!**\n🔑 Код: {client_code}\n📝 Начинаем диалог...")
     
     await update.message.reply_text(
-        QUESTIONS[1],
+        get_question_with_stage(1, 4),
         reply_markup=get_buttons_for_question("niche")
     )
     log_to_sheets(user.id, user.username, user.first_name, "Вопрос: ниша", status="Уточняем нишу")
     await schedule_reminder(context, user.id)
-
-# === ОБРАБОТКА КНОПОК ===
-@catch_errors
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    user = query.from_user
-    user_id = user.id
-    data = query.data
-    
-    logger.info(f"🔘 Кнопка нажата: {data} от {user_id}")
-    
-    for job in context.job_queue.jobs():
-        if job.name and job.name.startswith(f"reminder_{user_id}"):
-            job.schedule_removal()
-    
-    # Множественный выбор источников
-    if data.startswith("source_select_"):
-        value = data.replace("source_select_", "")
-        selected = user_temp_sources.get(user_id, [])
-        
-        if value in selected:
-            selected.remove(value)
-        else:
-            selected.append(value)
-        
-        user_temp_sources[user_id] = selected
-        
-        await query.edit_message_text(
-            text=QUESTIONS[4],
-            reply_markup=get_source_buttons_with_selected(selected)
-        )
-        return
-    
-    # Кнопка ГОТОВО
-    if data == "source_done":
-        selected = user_temp_sources.get(user_id, [])
-        if not selected:
-            await query.edit_message_text("❌ Выберите хотя бы один вариант или нажмите 'Другое'")
-            return
-        
-        answer = ", ".join(selected)
-        logger.info(f"✅ Выбор источников завершён для {user_id}: {answer}")
-        
-        answers = user_answers.get(user_id, {"niche": "", "turnover": "", "problem": "", "source": []})
-        answers["source"] = answer
-        user_answers[user_id] = answers
-        
-        # Проверка VIP
-        is_vip = False
-        if any(x in answers.get("turnover", "") for x in ["Более 3 млн", "3 млн", "3 000 000"]):
-            is_vip = True
-        
-        # Выжимка
-        summary = f"📊 **ВЫЖИМКА**\n\n"
-        summary += f"🔹 **Ниша:** {answers['niche']}\n"
-        summary += f"🔹 **Оборот:** {answers['turnover']}\n"
-        summary += f"🔹 **Проблема:** {answers['problem']}\n"
-        summary += f"🔹 **Источник:** {answer}"
-        
-        if is_vip:
-            summary += f"\n\n🔥 **VIP-КЛИЕНТ!**"
-        
-        add_note_to_client(user_id, summary)
-        log_to_sheets(user_id, user.username or "нет", user.first_name or "нет", f"Источник: {answer}", status="Передан руководителю", source=answer)
-        
-        # Прощание
-        farewell = f"{get_random_complete_effect()}\n\n"
-        farewell += f"🎉 **СПАСИБО, {user.first_name}!** 🎉\n\n"
-        farewell += f"Мы уже в курсе вашего запроса и скоро свяжемся.\n\n"
-        farewell += f"{get_random_complete_effect()}"
-        
-        await query.edit_message_text(farewell)
-        
-        # QR-код
-        qr_bio = await generate_qr_code(f"ADD production\nКонтакты: {', '.join(MANAGER_CONTACTS)}")
-        await context.bot.send_photo(chat_id=user_id, photo=qr_bio, caption="📱 Отсканируйте QR-код, чтобы сохранить контакты руководителя")
-        
-        user_stage[user_id] = 5
-        update_client_status(user_id, "Передан руководителю")
-        
-        topic_id = user_topics.get(user_id)
-        if topic_id:
-            await send_simple_message_to_topic(
-                context, topic_id,
-                f"Ответы на все вопросы", 
-                f"Ниша: {answers['niche']}\nОборот: {answers['turnover']}\nПроблема: {answers['problem']}\nИсточник: {answer}",
-                "Передан руководителю"
-            )
-        
-        if user_id in user_temp_sources:
-            del user_temp_sources[user_id]
-        return
-    
-    # Обычные кнопки
-    parts = data.split("_", 1)
-    if len(parts) < 2:
-        await query.edit_message_text("❌ Ошибка")
-        return
-    
-    question_type = parts[0]
-    answer = parts[1]
-    
-    stage = user_stage.get(user_id, 1)
-    answers = user_answers.get(user_id, {"niche": "", "turnover": "", "problem": "", "source": []})
-    
-    if answer == "other":
-        await query.edit_message_text(f"✍️ Напишите свой вариант ответа в чат.")
-        return
-    
-    if question_type == "niche":
-        answers["niche"] = answer
-        user_answers[user_id] = answers
-        await query.edit_message_text(f"✅ Принято: {answer}\n\n{QUESTIONS[2]}")
-        await context.bot.send_message(
-            chat_id=user_id,
-            text=QUESTIONS[2],
-            reply_markup=get_buttons_for_question("turnover")
-        )
-        user_stage[user_id] = 2
-        update_client_status(user_id, "Уточняем оборот")
-        await schedule_reminder(context, user_id)
-        
-    elif question_type == "turnover":
-        answers["turnover"] = answer
-        user_answers[user_id] = answers
-        await query.edit_message_text(f"✅ Принято: {answer}\n\n{QUESTIONS[3]}")
-        await context.bot.send_message(
-            chat_id=user_id,
-            text=QUESTIONS[3],
-            reply_markup=get_buttons_for_question("problem")
-        )
-        user_stage[user_id] = 3
-        update_client_status(user_id, "Уточняем проблему")
-        await schedule_reminder(context, user_id)
-        
-    elif question_type == "problem":
-        answers["problem"] = answer
-        user_answers[user_id] = answers
-        user_temp_sources[user_id] = []
-        await query.edit_message_text(
-            text=QUESTIONS[4],
-            reply_markup=get_source_buttons_with_selected([])
-        )
-        user_stage[user_id] = 4
-        update_client_status(user_id, "Уточняем источник")
-        await schedule_reminder(context, user_id)
 
 # === ОБРАБОТКА ТЕКСТА ===
 @catch_errors
@@ -758,7 +764,7 @@ async def handle_client_message(update: Update, context: ContextTypes.DEFAULT_TY
             job.schedule_removal()
     
     stage = user_stage.get(user_id, 1)
-    answers = user_answers.get(user_id, {"niche": "", "turnover": "", "problem": "", "source": []})
+    answers = user_answers.get(user_id, {"niche": "", "turnover": "", "problem": "", "source": ""})
     
     client_info = get_client_info(user_id)
     if client_info and client_info.get("status") in ["Передан руководителю", "Отказ"]:
@@ -767,16 +773,32 @@ async def handle_client_message(update: Update, context: ContextTypes.DEFAULT_TY
     
     msg_lower = message.text.lower()
     if any(word in msg_lower for word in ["позвоните", "свяжитесь", "напишите", "человек", "менеджер"]):
-        await message.reply_text(f"Я передаю ваш запрос руководителю. Он свяжется с вами в ближайшее время.\n\nКонтакты: @Darya_Pril06 или @anny_nizh.")
-        update_client_status(user_id, "Передан руководителю")
+        farewell = f"{get_random_complete_effect()}\n\n"
+        farewell += f"🎉 **СПАСИБО, {user.first_name}!** 🎉\n\n"
+        farewell += f"Мы уже в курсе вашего запроса и скоро свяжемся.\n\n"
+        farewell += f"{get_random_complete_effect()}"
+        
+        await message.reply_text(farewell)
+        
+        qr_bio = await generate_qr_code(f"ADD production\nКонтакты: {', '.join(MANAGER_CONTACTS)}")
+        await context.bot.send_photo(chat_id=user_id, photo=qr_bio, caption="📱 Отсканируйте QR-код, чтобы сохранить контакты руководителя")
+        
         user_stage[user_id] = 5
+        update_client_status(user_id, "Передан руководителю")
+        
+        await send_simple_message_to_topic(
+            context, topic_id,
+            "Клиент запросил связь с человеком", 
+            "Передан руководителю",
+            "Передан руководителю"
+        )
         return
     
     if stage == 1:
         answers["niche"] = message.text[:200]
         user_answers[user_id] = answers
         await message.reply_text(
-            QUESTIONS[2],
+            get_question_with_stage(2, 4),
             reply_markup=get_buttons_for_question("turnover")
         )
         user_stage[user_id] = 2
@@ -792,7 +814,7 @@ async def handle_client_message(update: Update, context: ContextTypes.DEFAULT_TY
             add_note_to_client(user_id, "🔥 VIP-КЛИЕНТ (оборот более 3 млн)")
         
         await message.reply_text(
-            QUESTIONS[3],
+            get_question_with_stage(3, 4),
             reply_markup=get_buttons_for_question("problem")
         )
         user_stage[user_id] = 3
@@ -802,10 +824,9 @@ async def handle_client_message(update: Update, context: ContextTypes.DEFAULT_TY
     elif stage == 3:
         answers["problem"] = message.text[:300]
         user_answers[user_id] = answers
-        user_temp_sources[user_id] = []
         await message.reply_text(
-            text=QUESTIONS[4],
-            reply_markup=get_source_buttons_with_selected([])
+            get_question_with_stage(4, 4),
+            reply_markup=get_buttons_for_question("source")
         )
         user_stage[user_id] = 4
         update_client_status(user_id, "Уточняем источник")
@@ -853,6 +874,18 @@ async def handle_client_message(update: Update, context: ContextTypes.DEFAULT_TY
         
     else:
         await message.reply_text(f"Ваш запрос уже передан руководителю. Если у вас остались вопросы, напишите напрямую: {', '.join(MANAGER_CONTACTS)}")
+
+# === АВТООТВЕТ НА "СПАСИБО" ===
+@catch_errors
+async def handle_thanks(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    message = update.message
+    user_id = user.id
+    
+    client_info = get_client_info(user_id)
+    if client_info and client_info.get("status") == "Передан руководителю":
+        if any(word in message.text.lower() for word in ["спасибо", "благодарю", "thanks"]):
+            await message.reply_text("🌟 Всегда рады помочь! Хорошего дня! 🌟")
 
 # === АНАЛИТИКА ПО ИСТОЧНИКАМ ===
 @catch_errors
@@ -1436,12 +1469,13 @@ def main():
     app.add_handler(CommandHandler("active", active_command))
     app.add_handler(CommandHandler("timeline", timeline_command))
     
-    app.add_handler(CallbackQueryHandler(button_callback, pattern="^(niche|turnover|problem|source_select|source_done)_"))
+    app.add_handler(CallbackQueryHandler(button_callback, pattern="^(niche|turnover|problem|source)_"))
     app.add_handler(CallbackQueryHandler(broadcast_callback, pattern="^broadcast_"))
     
     app.add_handler(MessageHandler(filters.Chat(GROUP_ID) & filters.TEXT & ~filters.COMMAND, handle_admin_reply_in_topic))
     app.add_handler(MessageHandler(~filters.Chat(ADMIN_ID) & (filters.PHOTO | filters.VIDEO | filters.Document.ALL | filters.VOICE), handle_media))
     app.add_handler(MessageHandler(~filters.Chat(ADMIN_ID) & filters.TEXT & ~filters.COMMAND, handle_client_message))
+    app.add_handler(MessageHandler(~filters.Chat(ADMIN_ID) & filters.TEXT & ~filters.COMMAND, handle_thanks))
     
     job_queue = app.job_queue
     if job_queue:
